@@ -3,7 +3,7 @@ import os
 import time
 import csv
 from picamera2 import Picamera2
-import smbus # For I2C
+import smbus2 # For I2C
 import socket # For IPC
 # import struct # For packing/unpacking control data if needed (not used in current logic)
 import select # For non-blocking socket read
@@ -14,7 +14,7 @@ from PIL import Image # Using PIL to save image, as in your original record_fram
 SOCKET_PATH = "/tmp/robot_control_socket" # Path for the socket file
 
 # ---------- IMU GY-87 SETUP ----------
-bus = smbus.SMBus(1) # I2C bus 1 on Raspberry Pi
+bus = smbus2.SMBus(1) # I2C bus 1 on Raspberry Pi
 
 # MPU6050 (Accelerometer and Gyroscope)
 MPU6050_ADDR = 0x68
@@ -46,28 +46,28 @@ BMP180_CALIBRATION_OK = False # Flag to indicate if calibration data was read su
 
 
 
-def _read_signed_byte(self, addr, reg):
+def _read_signed_byte(addr, reg):
     """Reads a signed byte from I2C."""
     try:
-        val = self.bus.read_byte_data(addr, reg)
+        val = bus.read_byte_data(addr, reg)
         return val if val < 128 else val - 256
     except OSError as e:
         # print(f"Warning: I2C signed byte read error from addr {hex(addr)}, reg {hex(reg)}: {e}")
         return None
 
-def _read_unsigned_byte(self, addr, reg):
+def _read_unsigned_byte(addr, reg):
     """Reads an unsigned byte from I2C."""
     try:
-        return self.bus.read_byte_data(addr, reg)
+        return bus.read_byte_data(addr, reg)
     except OSError as e:
         # print(f"Warning: I2C unsigned byte read error from addr {hex(addr)}, reg {hex(reg)}: {e}")
         return None
 
-def _read_signed_word_2c(self, addr, reg):
+def _read_signed_word_2c(addr, reg):
     """Reads a signed 16-bit word (big-endian) using 2's complement."""
     try:
-        high = self.bus.read_byte_data(addr, reg)
-        low = self.bus.read_byte_data(addr, reg + 1)
+        high = bus.read_byte_data(addr, reg)
+        low = bus.read_byte_data(addr, reg + 1)
         val = (high << 8) + low
         # S?a l?i nh?: M?c d?nh hm ny d?c Big Endian, nhung n?u c?m bi?n tr? v? Little Endian th c?n d?o l?i
         # Tuy nhin, MPU6050, HMC5883L thu?ng  Big Endian. BMP180 cung v?y khi d?c t?ng byte.
@@ -77,11 +77,11 @@ def _read_signed_word_2c(self, addr, reg):
         # print(f"Warning: I2C signed word read error from addr {hex(addr)}, reg {hex(reg)}: {e}")
         return None
 
-def _read_unsigned_word(self, addr, reg):
+def _read_unsigned_word(addr, reg):
     """Reads an unsigned 16-bit word (big-endian)."""
     try:
-        high = self.bus.read_byte_data(addr, reg)
-        low = self.bus.read_byte_data(addr, reg + 1)
+        high = bus.read_byte_data(addr, reg)
+        low = bus.read_byte_data(addr, reg + 1)
         return (high << 8) + low
     except OSError as e:
         # print(f"Warning: I2C unsigned word read error from addr {hex(addr)}, reg {hex(reg)}: {e}")

@@ -3,9 +3,9 @@ import struct
 import pickle
 import cv2
 from picamera2 import Picamera2
-
+cam_inx = 0
 # Initialize Picamera2
-picam2 = Picamera2()
+picam2 = Picamera2(camera_num=cam_inx)
 picam2.preview_configuration.main.size = (640, 480)
 picam2.preview_configuration.main.format = "RGB888"
 picam2.preview_configuration.controls.FrameRate = 30
@@ -14,7 +14,7 @@ picam2.start()
 
 # Set up socket
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server_socket.bind(("0.0.0.0", 8080))  # Listen on all interfaces
+server_socket.bind(("0.0.0.0", 8080+cam_inx))  # Listen on all interfaces
 server_socket.listen(1)
 
 print("? Waiting for connection...")

@@ -154,23 +154,23 @@ def get_imu_data():
         "pressure": -1, "altitude_bmp": -1, "temperature_bmp": -1 # Default to error values
     }
     try: # MPU6050
-        # ... (code đọc MPU6050 như cũ) ...
-        imu_payload["accel_x"] = _read_signed_word_2c(bus, MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H) / 16384.0
-        imu_payload["accel_y"] = _read_signed_word_2c(bus, MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H + 2) / 16384.0
-        imu_payload["accel_z"] = _read_signed_word_2c(bus, MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H + 4) / 16384.0
-        imu_payload["gyro_x"] = _read_signed_word_2c(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H) / 131.0
-        imu_payload["gyro_y"] = _read_signed_word_2c(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H + 2) / 131.0
-        imu_payload["gyro_z"] = _read_signed_word_2c(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H + 4) / 131.0
-        temp_raw_mpu = _read_signed_word_2c(bus, MPU6050_ADDR, MPU6050_REG_TEMP_OUT_H)
+        # ... (code Ä‘á»c MPU6050 nhÆ° cÅ©) ...
+        imu_payload["accel_x"] = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H) / 16384.0
+        imu_payload["accel_y"] = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H + 2) / 16384.0
+        imu_payload["accel_z"] = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H + 4) / 16384.0
+        imu_payload["gyro_x"] = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H) / 131.0
+        imu_payload["gyro_y"] = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H + 2) / 131.0
+        imu_payload["gyro_z"] = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H + 4) / 131.0
+        temp_raw_mpu = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_TEMP_OUT_H)
         imu_payload["temperature_mpu"] = temp_raw_mpu / 340.0 + 36.53
     except Exception as e:
         print(f"Error reading MPU6050: {e}")
 
     try: # HMC5883L
-        # ... (code đọc HMC5883L như cũ) ...
-        mag_x_raw = _read_signed_word_2c(bus, HMC5883L_ADDR, HMC5883L_REG_XOUT_H)
-        mag_z_raw = _read_signed_word_2c(bus, HMC5883L_ADDR, HMC5883L_REG_ZOUT_H) # Z-axis
-        mag_y_raw = _read_signed_word_2c(bus, HMC5883L_ADDR, HMC5883L_REG_YOUT_H) # Y-axis
+        # ... (code Ä‘á»c HMC5883L nhÆ° cÅ©) ...
+        mag_x_raw = _read_signed_word_2c(HMC5883L_ADDR, HMC5883L_REG_XOUT_H)
+        mag_z_raw = _read_signed_word_2c(HMC5883L_ADDR, HMC5883L_REG_ZOUT_H) # Z-axis
+        mag_y_raw = _read_signed_word_2c(HMC5883L_ADDR, HMC5883L_REG_YOUT_H) # Y-axis
         imu_payload["mag_x"] = mag_x_raw * 0.92 
         imu_payload["mag_y"] = mag_y_raw * 0.92 
         imu_payload["mag_z"] = mag_z_raw * 0.92
@@ -185,7 +185,7 @@ def get_imu_data():
             # Read uncompensated temperature
             bus.write_byte_data(BMP180_ADDR, BMP180_REG_CONTROL, BMP180_CMD_READ_TEMP)
             time.sleep(0.005) # Wait for measurement (4.5ms for temp)
-            UT = read_unsigned_word_big_endian(bus, BMP180_ADDR, BMP180_REG_RESULT_MSB)
+            UT = _read_unsigned_word(BMP180_ADDR, BMP180_REG_RESULT_MSB)
 
             # Read uncompensated pressure (OSS=0 for this example)
             OSS = 0 # Oversampling setting (0,1,2,3)

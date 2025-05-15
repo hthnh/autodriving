@@ -154,7 +154,7 @@ def get_imu_data():
         "pressure": -1, "altitude_bmp": -1, "temperature_bmp": -1 # Default to error values
     }
     try: # MPU6050
-        # ... (code Ä‘á»c MPU6050 nhÆ° cÅ©) ...
+        # ... (code đọc MPU6050 như cũ) ...
         imu_payload["accel_x"] = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H) / 16384.0
         imu_payload["accel_y"] = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H + 2) / 16384.0
         imu_payload["accel_z"] = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H + 4) / 16384.0
@@ -167,7 +167,7 @@ def get_imu_data():
         print(f"Error reading MPU6050: {e}")
 
     try: # HMC5883L
-        # ... (code Ä‘á»c HMC5883L nhÆ° cÅ©) ...
+        # ... (code đọc HMC5883L như cũ) ...
         mag_x_raw = _read_signed_word_2c(HMC5883L_ADDR, HMC5883L_REG_XOUT_H)
         mag_z_raw = _read_signed_word_2c(HMC5883L_ADDR, HMC5883L_REG_ZOUT_H) # Z-axis
         mag_y_raw = _read_signed_word_2c(HMC5883L_ADDR, HMC5883L_REG_YOUT_H) # Y-axis
@@ -219,7 +219,9 @@ def get_imu_data():
                 X2_p = AC2 * B6 / (2**11)
                 X3_p = X1_p + X2_p
                 # Denominator for B3: 4 - OK
-                B3 = (((AC1 * 4 + X3_p) << OSS) + 2) / 4
+                term_before_shift_B3 = AC1 * 4 + X3_p
+                integer_term_for_B3 = int(term_before_shift_B3)
+                B3 = ((integer_term_for_B3 << OSS) + 2) << 2
                 # Denominators in X1, X2 for B4: (2**13), (2**16) - OK
                 X1_b4 = AC3 * B6 / (2**13)
                 X2_b4 = (B1 * (B6 * B6 / (2**12))) / (2**16)
@@ -396,9 +398,21 @@ def main_teach():
             recorder.record_frame(imu_data, latest_control_commands)
             
             # Print IMU data periodically for debugging, e.g., every 20 loops (2 seconds if 0.1s sleep)
+            # Print IMU data periodically for debugging
             if loop_count % 20 == 0:
-                print(f"IMU: Temp_BMP={imu_data.get('temperature_bmp', -1):.2f}C, Press_hPa={imu_data.get('pressure', -1):.2f}")
-
+                print(f"--- GY-87 IMU Data ---")
+                print(f"  MPU6050:")
+                print(f"    Accel (X,Y,Z): {imu_data.get('accel_x', 0):.2f}g, {imu_data.get('accel_y', 0):.2f}g, {imu_data.get('accel_z', 0):.2f}g")
+                print(f"    Gyro  (X,Y,Z): {imu_data.get('gyro_x', 0):.2f}dps, {imu_data.get('gyro_y', 0):.2f}dps, {imu_data.get('gyro_z', 0):.2f}dps")
+                print(f"    Temp:          {imu_data.get('temperature_mpu', -1):.2f}C")
+                print(f"  HMC5883L:")
+                
+                print(f"    Mag   (X,Y,Z): {imu_data.get('mag_x', 0):.2f}mG, {imu_data.get('mag_y', 0):.2f}mG, {imu_data.get('mag_z', 0):.2f}mG")
+                print(f"  BMP180:")
+                print(f"    Temp:          {imu_data.get('temperature_bmp', -1):.2f}C")
+                print(f"    Pressure:      {imu_data.get('pressure', -1):.2f}hPa")
+                print(f"    Altitude:      {imu_data.get('altitude_bmp', -1):.2f}m")
+                print(f"----------------------")
             loop_count += 1
             time.sleep(0.1) # Adjust rate as needed
 

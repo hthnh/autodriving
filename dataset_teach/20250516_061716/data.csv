@@ -1,0 +1,1 @@
+timestamp,frame_file,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,mag_x,mag_y,mag_z,temp_mpu,temp_bmp,pressure_hpa,altitude_bmp,motor_left_dir,motor_left_speed,motor_right_dir,motor_right_speed,servo1_angle,servo2_angle

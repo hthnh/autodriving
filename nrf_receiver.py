@@ -1,7 +1,7 @@
 # nrf_receiver.py
 # Reads data from NRF24L01 and publishes it to a Redis Stream.
 
-from RF24 import RF24, RF24_PA_LOW # RF24_250KBPS might be needed based on your sender
+from RF24 import RF24, RF24_PA_MAX, RF24_250KBPS  # RF24_250KBPS might be needed based on your sender
 import struct
 import time
 import redis
@@ -40,8 +40,8 @@ def setup_radio():
     
     # Set NRF24L01 parameters (must match sender)
     radio.setChannel(115)             # Example channel
-    radio.setPALevel(RF24_PA_LOW)     # Power Amplifier level
-    radio.setDataRate(RF24.RF24_250KBPS) # Example data rate, use RF24_1MBPS or RF24_2MBPS if sender uses that
+    radio.setPALevel(RF24_PA_MAX)     # Power Amplifier level
+    radio.setDataRate(RF24_250KBPS) # Example data rate, use RF24_1MBPS or RF24_2MBPS if sender uses that
 
     radio.openReadingPipe(1, PIPE_ADDRESS) # Open pipe 1 for listening
     radio.startListening()                 # Start listening for data
@@ -100,6 +100,7 @@ def main_loop():
                     redis_payload['joyX2'] = joy_values_tuple[2]
                     redis_payload['joyY2'] = joy_values_tuple[3]
                     redis_payload['timestamp'] = time.time() # Add a server-side timestamp
+                    print(f"DEBUG NRF_Receiver: Publishing to Redis: {redis_payload}") # <--- THÊM DÒNG NÀY
 
                     # Publish to Redis Stream
                     message_id = redis_client.xadd(RAW_NRF_STREAM_NAME, redis_payload)

@@ -1,444 +1,473 @@
 # teach.py
+# Logs IMU data, Camera images, Control Commands (from Redis), and IPS data (from Redis).
+
 import os
 import time
 import csv
 from picamera2 import Picamera2
-import smbus2 # For I2C
-import socket # For IPC
-# import struct # For packing/unpacking control data if needed (not used in current logic)
-import select # For non-blocking socket read
-import cv2 # Uncomment if you use cv2.flip and have it installed. Currently commented out.
-from PIL import Image # Using PIL to save image, as in your original record_frame
+import smbus # For I2C with IMU
+import redis # For IPC with control_processor.py and ips.py
+import select # For non-blocking socket/stream read (not directly used with redis-py xread)
+import sys
+# import cv2 # Uncomment if you use cv2.flip and have it installed
 
-# ---------- IPC SETUP (Unix Domain Socket) ----------
-SOCKET_PATH = "/tmp/robot_control_socket" # Path for the socket file
+# ---------- Redis Configuration ----------
+REDIS_HOST = 'localhost'
+REDIS_PORT = 6379
+redis_client = None
 
-# ---------- IMU GY-87 SETUP ----------
-bus = smbus2.SMBus(1) # I2C bus 1 on Raspberry Pi
+# Streams to consume from
+CONTROL_STREAM_NAME = 'vehicle:commands_processed'
+IPS_STREAM_NAME = 'ips:data' # Assuming ips.py publishes to this stream
 
-# MPU6050 (Accelerometer and Gyroscope)
+# Consumer group names (can be unique to teach.py or shared if appropriate)
+TEACH_CONSUMER_GROUP_CONTROL = 'teach_group_control'
+TEACH_CONSUMER_GROUP_IPS = 'teach_group_ips'
+TEACH_CONSUMER_NAME = 'teach_instance_1'
+
+# Variables to store the latest received data from Redis
+latest_control_commands = {
+    "motor_left_dir": 0, "motor_left_speed": 0,
+    "motor_right_dir": 0, "motor_right_speed": 0,
+    "servo1_angle": 90, "servo2_angle": 90,
+    "e_stop_active": 0
+}
+latest_ips_data = {
+    "ips_x": None, "ips_y": None, "ips_yaw": None, # Use None for null/not available
+    "ips_quality": None
+}
+# Last read IDs for Redis streams to avoid reprocessing old messages if script restarts without group
+# last_control_id = '0-0' # Start from beginning, or use '$' for only new after start
+# last_ips_id = '0-0'
+
+# ---------- IMU GY-87 SETUP (Copy from your working teach.py or nrf_receiver.py) ----------
+# Ensure all necessary I2C addresses and registers are defined here
+bus = smbus.SMBus(1)
 MPU6050_ADDR = 0x68
 MPU6050_REG_PWR_MGMT_1 = 0x6B
 MPU6050_REG_ACCEL_XOUT_H = 0x3B
 MPU6050_REG_GYRO_XOUT_H = 0x43
 MPU6050_REG_TEMP_OUT_H = 0x41
 
-# HMC5883L (Magnetometer)
 HMC5883L_ADDR = 0x1E
 HMC5883L_REG_CONFIG_A = 0x00
 HMC5883L_REG_CONFIG_B = 0x01
 HMC5883L_REG_MODE = 0x02
-HMC5883L_REG_XOUT_H = 0x03
-HMC5883L_REG_ZOUT_H = 0x05
-HMC5883L_REG_YOUT_H = 0x07
+HMC5883L_REG_DATA_X_MSB = 0x03
 
-# BMP180 (Barometer/Temperature)
 BMP180_ADDR = 0x77
 BMP180_REG_CONTROL = 0xF4
 BMP180_REG_RESULT_MSB = 0xF6
 BMP180_CMD_READ_TEMP = 0x2E
 BMP180_CMD_READ_PRESSURE_0 = 0x34
 
-# --- BMP180 Calibration Data ---
 AC1, AC2, AC3, B1, B2, MB, MC, MD = 0,0,0,0,0,0,0,0
 AC4, AC5, AC6 = 0,0,0
-BMP180_CALIBRATION_OK = False # Flag to indicate if calibration data was read successfully
 
+def read_signed_word(bus_obj, addr, reg):
+    high = bus_obj.read_byte_data(addr, reg)
+    low = bus_obj.read_byte_data(addr, reg + 1)
+    value = (high << 8) + low
+    return value - 65536 if value >= 0x8000 else value
 
+def read_unsigned_word(bus_obj, addr, reg):
+    high = bus_obj.read_byte_data(addr, reg)
+    low = bus_obj.read_byte_data(addr, reg + 1)
+    return (high << 8) + low
 
-def _read_signed_byte(addr, reg):
-    """Reads a signed byte from I2C."""
-    try:
-        val = bus.read_byte_data(addr, reg)
-        return val if val < 128 else val - 256
-    except OSError as e:
-        # print(f"Warning: I2C signed byte read error from addr {hex(addr)}, reg {hex(reg)}: {e}")
-        return None
+def read_signed_word_big_endian(bus_obj, addr, reg_msb):
+    msb = bus_obj.read_byte_data(addr, reg_msb)
+    lsb = bus_obj.read_byte_data(addr, reg_msb + 1)
+    val = (msb << 8) + lsb
+    return val - 65536 if val >= 0x8000 else val
 
-def _read_unsigned_byte(addr, reg):
-    """Reads an unsigned byte from I2C."""
-    try:
-        return bus.read_byte_data(addr, reg)
-    except OSError as e:
-        # print(f"Warning: I2C unsigned byte read error from addr {hex(addr)}, reg {hex(reg)}: {e}")
-        return None
-
-def _read_signed_word_2c(addr, reg):
-    """Reads a signed 16-bit word (big-endian) using 2's complement."""
-    try:
-        high = bus.read_byte_data(addr, reg)
-        low = bus.read_byte_data(addr, reg + 1)
-        val = (high << 8) + low
-        # S?a l?i nh?: M?c d?nh hm ny d?c Big Endian, nhung n?u c?m bi?n tr? v? Little Endian th c?n d?o l?i
-        # Tuy nhin, MPU6050, HMC5883L thu?ng  Big Endian. BMP180 cung v?y khi d?c t?ng byte.
-        # Gi? nguy logic ny cho cc hm d?c sensor hi?n c.
-        return val if val < 32768 else val - 65536
-    except OSError as e:
-        # print(f"Warning: I2C signed word read error from addr {hex(addr)}, reg {hex(reg)}: {e}")
-        return None
-
-def _read_unsigned_word(addr, reg):
-    """Reads an unsigned 16-bit word (big-endian)."""
-    try:
-        high = bus.read_byte_data(addr, reg)
-        low = bus.read_byte_data(addr, reg + 1)
-        return (high << 8) + low
-    except OSError as e:
-        # print(f"Warning: I2C unsigned word read error from addr {hex(addr)}, reg {hex(reg)}: {e}")
-        return None
+def read_unsigned_word_big_endian(bus_obj, addr, reg_msb):
+    msb = bus_obj.read_byte_data(addr, reg_msb)
+    lsb = bus_obj.read_byte_data(addr, reg_msb + 1)
+    return (msb << 8) + lsb
 
 def setup_imu():
-    global AC1, AC2, AC3, B1, B2, MB, MC, MD, AC4, AC5, AC6, BMP180_CALIBRATION_OK
-    
-    print("[INFO] Initializing IMU...")
-    # Wake MPU6050
+    global AC1, AC2, AC3, B1, B2, MB, MC, MD, AC4, AC5, AC6 # Ensure these are global for modification
+    print("Teach: Initializing IMU...")
+    try: bus.write_byte_data(MPU6050_ADDR, MPU6050_REG_PWR_MGMT_1, 0x00)
+    except Exception as e: print(f"Teach: Failed to wake MPU6050: {e}")
     try:
-        bus.write_byte_data(MPU6050_ADDR, MPU6050_REG_PWR_MGMT_1, 0x00)
-        print("[INFO] MPU6050 woken up.")
-    except Exception as e:
-        print(f"[ERROR] Failed to wake MPU6050: {e}")
-
-    # Configure HMC5883L
+        bus.write_byte_data(HMC5883L_ADDR, HMC5883L_REG_CONFIG_A, 0x70)
+        bus.write_byte_data(HMC5883L_ADDR, HMC5883L_REG_CONFIG_B, 0xA0)
+        bus.write_byte_data(HMC5883L_ADDR, HMC5883L_REG_MODE, 0x00)
+    except Exception as e: print(f"Teach: Failed to configure HMC5883L: {e}")
     try:
-        bus.write_byte_data(HMC5883L_ADDR, HMC5883L_REG_CONFIG_A, 0x70) # 8-average, 15 Hz
-        bus.write_byte_data(HMC5883L_ADDR, HMC5883L_REG_CONFIG_B, 0xA0) # Gain (might need adjustment)
-        bus.write_byte_data(HMC5883L_ADDR, HMC5883L_REG_MODE, 0x00)   # Continuous measurement
-        print("[INFO] HMC5883L configured.")
-    except Exception as e:
-        print(f"[ERROR] Failed to configure HMC5883L: {e}")
-
-    # Read BMP180 calibration data
-    print("[INFO] Reading BMP180 calibration data...")
-    try:
-        AC1 = _read_signed_word_2c(BMP180_ADDR, 0xAA)
-        AC2 = _read_signed_word_2c(BMP180_ADDR, 0xAC)
-        AC3 = _read_signed_word_2c(BMP180_ADDR, 0xAE)
-        AC4 = _read_unsigned_word(BMP180_ADDR, 0xB0)
-        AC5 = _read_unsigned_word(BMP180_ADDR, 0xB2)
-        AC6 = _read_unsigned_word(BMP180_ADDR, 0xB4)
-        B1 = _read_signed_word_2c(BMP180_ADDR, 0xB6)
-        B2 = _read_signed_word_2c(BMP180_ADDR, 0xB8)
-        MB = _read_signed_word_2c(BMP180_ADDR, 0xBA)
-        MC = _read_signed_word_2c(BMP180_ADDR, 0xBC)
-        MD = _read_signed_word_2c(BMP180_ADDR, 0xBE)
-
-        # --- crucial check ---
-        # A simple check: if all are zero, something is very wrong.
-        # More robust checks would ensure values are within expected ranges for BMP180.
-        if all(v == 0 for v in [AC1, AC2, AC3, AC4, AC5, AC6, B1, B2, MB, MC, MD]):
-            print("[ERROR] All BMP180 calibration coefficients are zero! Check I2C connection to BMP180 (addr 0x77).")
-            BMP180_CALIBRATION_OK = False
-        elif AC5 == 0 or AC6 == 0 or MC == 0 or MD == 0 : # Add checks for specific problematic zeros for division
-             print(f"[WARNING] Some critical BMP180 calibration coefficients are zero: AC5={AC5}, AC6={AC6}, MC={MC}, MD={MD}")
-             print("This might lead to division by zero. Check sensor and I2C connection.")
-            
-             BMP180_CALIBRATION_OK = False # Treat as failure if critical coeffs are zero
-        else:
-            BMP180_CALIBRATION_OK = True
-            print("[INFO] BMP180 calibration data read successfully.")
-            # Optional: Print them for debugging
-            print(f"  AC1={AC1}, AC2={AC2}, AC3={AC3}, AC4={AC4}, AC5={AC5}, AC6={AC6}")
-            print(f"  B1={B1}, B2={B2}, MB={MB}, MC={MC}, MD={MD}")
-
-    except Exception as e:
-        print(f"[ERROR] Failed to read BMP180 calibration data: {e}")
-        BMP180_CALIBRATION_OK = False
+        AC1 = read_signed_word_big_endian(bus, BMP180_ADDR, 0xAA)
+        AC2 = read_signed_word_big_endian(bus, BMP180_ADDR, 0xAC)
+        AC3 = read_signed_word_big_endian(bus, BMP180_ADDR, 0xAE)
+        AC4 = read_unsigned_word_big_endian(bus, BMP180_ADDR, 0xB0)
+        AC5 = read_unsigned_word_big_endian(bus, BMP180_ADDR, 0xB2)
+        AC6 = read_unsigned_word_big_endian(bus, BMP180_ADDR, 0xB4)
+        B1 = read_signed_word_big_endian(bus, BMP180_ADDR, 0xB6)
+        B2 = read_signed_word_big_endian(bus, BMP180_ADDR, 0xB8)
+        MB = read_signed_word_big_endian(bus, BMP180_ADDR, 0xBA)
+        MC = read_signed_word_big_endian(bus, BMP180_ADDR, 0xBC)
+        MD = read_signed_word_big_endian(bus, BMP180_ADDR, 0xBE)
+        print("Teach: IMU BMP180 calibration data read.")
+    except Exception as e: print(f"Teach: Failed to read BMP180 calibration data: {e}")
+    print("Teach: IMU setup complete.")
 
 def get_imu_data():
-    global BMP180_CALIBRATION_OK # Ensure we use the global flag
+    # This function should be identical to the one you finalized for teach.py
+    # that reads MPU6050, HMC5883L, and BMP180.
+    # For brevity, I'll use a placeholder structure.
+    # MAKE SURE TO COPY YOUR FULL WORKING get_imu_data() HERE.
     imu_payload = {
         "accel_x": 0, "accel_y": 0, "accel_z": 0,
         "gyro_x": 0, "gyro_y": 0, "gyro_z": 0,
         "mag_x": 0, "mag_y": 0, "mag_z": 0,
-        "temperature_mpu": 0,
-        "pressure": -1, "altitude_bmp": -1, "temperature_bmp": -1 # Default to error values
+        "temperature_mpu": 0, "pressure": 0, "altitude_bmp": 0, "temperature_bmp": 0
     }
     try: # MPU6050
-        # ... (code đọc MPU6050 như cũ) ...
-        imu_payload["accel_x"] = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H) / 16384.0
-        imu_payload["accel_y"] = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H + 2) / 16384.0
-        imu_payload["accel_z"] = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H + 4) / 16384.0
-        imu_payload["gyro_x"] = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H) / 131.0
-        imu_payload["gyro_y"] = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H + 2) / 131.0
-        imu_payload["gyro_z"] = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H + 4) / 131.0
-        temp_raw_mpu = _read_signed_word_2c(MPU6050_ADDR, MPU6050_REG_TEMP_OUT_H)
+        imu_payload["accel_x"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H) / 16384.0
+        imu_payload["accel_y"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H + 2) / 16384.0
+        imu_payload["accel_z"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H + 4) / 16384.0
+        imu_payload["gyro_x"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H) / 131.0
+        imu_payload["gyro_y"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H + 2) / 131.0
+        imu_payload["gyro_z"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H + 4) / 131.0
+        temp_raw_mpu = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_TEMP_OUT_H)
         imu_payload["temperature_mpu"] = temp_raw_mpu / 340.0 + 36.53
-    except Exception as e:
-        print(f"Error reading MPU6050: {e}")
+    except Exception as e: pass # print(f"Teach: Error reading MPU6050: {e}")
 
     try: # HMC5883L
-        # ... (code đọc HMC5883L như cũ) ...
-        mag_x_raw = _read_signed_word_2c(HMC5883L_ADDR, HMC5883L_REG_XOUT_H)
-        mag_z_raw = _read_signed_word_2c(HMC5883L_ADDR, HMC5883L_REG_ZOUT_H) # Z-axis
-        mag_y_raw = _read_signed_word_2c(HMC5883L_ADDR, HMC5883L_REG_YOUT_H) # Y-axis
-        imu_payload["mag_x"] = mag_x_raw * 0.92 
-        imu_payload["mag_y"] = mag_y_raw * 0.92 
-        imu_payload["mag_z"] = mag_z_raw * 0.92
-    except Exception as e:
-        print(f"Error reading HMC5883L: {e}")
+        mag_x_raw = read_signed_word_big_endian(bus, HMC5883L_ADDR, HMC5883L_REG_DATA_X_MSB)
+        mag_z_raw = read_signed_word_big_endian(bus, HMC5883L_ADDR, HMC5883L_REG_DATA_X_MSB + 2) # Z is usually next
+        mag_y_raw = read_signed_word_big_endian(bus, HMC5883L_ADDR, HMC5883L_REG_DATA_X_MSB + 4) # Then Y
+        imu_payload["mag_x"], imu_payload["mag_y"], imu_payload["mag_z"] = mag_x_raw * 0.92, mag_y_raw * 0.92, mag_z_raw * 0.92
+    except Exception as e: pass # print(f"Teach: Error reading HMC5883L: {e}")
 
-    if not BMP180_CALIBRATION_OK:
-        print("Skipping BMP180 reading due to calibration failure or invalid coefficients.")
-        # Values already defaulted to -1 in imu_payload
-    else:
-        try: # BMP180 calculations
-            # Read uncompensated temperature
-            bus.write_byte_data(BMP180_ADDR, BMP180_REG_CONTROL, BMP180_CMD_READ_TEMP)
-            time.sleep(0.005) # Wait for measurement (4.5ms for temp)
-            UT = _read_unsigned_word(BMP180_ADDR, BMP180_REG_RESULT_MSB)
-
-            # Read uncompensated pressure (OSS=0 for this example)
-            OSS = 0 # Oversampling setting (0,1,2,3)
-            bus.write_byte_data(BMP180_ADDR, BMP180_REG_CONTROL, BMP180_CMD_READ_PRESSURE_0 + (OSS << 6))
-
-            time.sleep(0.005) # Datasheet: 4.5ms for OSS=0
-            
-            UP_msb = bus.read_byte_data(BMP180_ADDR, 0xF6)
-            UP_lsb = bus.read_byte_data(BMP180_ADDR, 0xF7)
-            UP_xlsb = bus.read_byte_data(BMP180_ADDR, 0xF8)
-            UP = ((UP_msb << 16) + (UP_lsb << 8) + UP_xlsb) >> (8 - OSS)
-
-   
-
-            X1_temp = (UT - AC6) * AC5 / (2**15) # Renamed to avoid conflict with X1 for pressure
-            
-            if (X1_temp + MD) == 0:
-                print(f"[ERROR] BMP180: Division by zero in temperature calculation (X1_temp + MD == 0).")
-                print(f"  UT={UT}, AC6={AC6}, AC5={AC5}, MC={MC}, MD={MD}, X1_temp={X1_temp}")
-                # imu_payload["temperature_bmp"] already -1
-            else:
-                X2_temp = MC * (2**11) / (X1_temp + MD)
-                B5 = X1_temp + X2_temp
-                true_temp_c = (B5 + 8) / (160.0) # Corrected: (2**4 * 10.0) = 160.0 for temp in C
-                imu_payload["temperature_bmp"] = true_temp_c
-
-                # Calculate true pressure (only if temperature calculation was successful)
-                B6 = B5 - 4000
-                # Denominators in X1, X2 for pressure: (2**11), (2**11) - OK
-                X1_p = (B2 * (B6 * B6 / (2**12))) / (2**11) # Renamed
-                X2_p = AC2 * B6 / (2**11)
-                X3_p = X1_p + X2_p
-                # Denominator for B3: 4 - OK
-                term_before_shift_B3 = AC1 * 4 + X3_p
-                integer_term_for_B3 = int(term_before_shift_B3)
-                B3 = ((integer_term_for_B3 << OSS) + 2) << 2
-                # Denominators in X1, X2 for B4: (2**13), (2**16) - OK
-                X1_b4 = AC3 * B6 / (2**13)
-                X2_b4 = (B1 * (B6 * B6 / (2**12))) / (2**16)
-                X3_b4 = ((X1_b4 + X2_b4) + 2) / 4 # Denom 4 - OK
-                # Denominator for B4: (2**15) - OK
-                B4 = AC4 * (X3_b4 + 32768) / (2**15)
-                
-                if B4 == 0:
-                    print(f"[ERROR] BMP180: Division by zero in pressure calculation (B4 == 0).")
-                    # imu_payload["pressure"] already -1
-                else:
-                    B7 = (UP - B3) * (50000 >> OSS)
-                    if B7 < 0x80000000:
-                        p = (B7 * 2) / B4
-                    else:
-                        p = (B7 / B4) * 2
-                    
-                    X1_final = (p / (2**8)) * (p / (2**8))
-                    X1_final = (X1_final * 3038) / (2**16) # Denom (2**16) - OK
-                    X2_final = (-7357 * p) / (2**16)    # Denom (2**16) - OK
-                    pressure_pa = p + (X1_final + X2_final + 3791) / 16.0 # Denom (2**4) - OK
-                    imu_payload["pressure"] = pressure_pa / 100.0 # Convert Pa to hPa (mbar)
-            
-                    # Calculate altitude
-                    # Using standard sea level pressure in hPa to match pressure unit
-                    sea_level_pressure_hpa = 1013.25 
-                  
-                    pressure_for_alt_calc = pressure_pa # Use Pa for 101325.0
-                    if pressure_for_alt_calc > 0: # Avoid math error if pressure is invalid
-                         imu_payload["altitude_bmp"] = 44330 * (1.0 - pow(pressure_for_alt_calc / 101325.0, 1/5.255))
-                    else:
-                         imu_payload["altitude_bmp"] = -1
-
-
-        except ZeroDivisionError: # Catch specific error
-            print(f"Error reading BMP180: Float division by zero occurred during calculation.")
-            # imu_payload values already defaulted to -1 or previous error state
-        except Exception as e:
-            print(f"Error processing BMP180 data: {e}")
-            # imu_payload values already defaulted to -1
-
+    try: # BMP180
+        bus.write_byte_data(BMP180_ADDR, BMP180_REG_CONTROL, BMP180_CMD_READ_TEMP)
+        time.sleep(0.005)
+        UT = read_unsigned_word_big_endian(bus, BMP180_ADDR, BMP180_REG_RESULT_MSB)
+        OSS = 0
+        bus.write_byte_data(BMP180_ADDR, BMP180_REG_CONTROL, BMP180_CMD_READ_PRESSURE_0 + (OSS << 6))
+        time.sleep(0.005 + (0.003 * (1<<OSS)))
+        UP_msb = bus.read_byte_data(BMP180_ADDR, 0xF6)
+        UP_lsb = bus.read_byte_data(BMP180_ADDR, 0xF7)
+        UP_xlsb = bus.read_byte_data(BMP180_ADDR, 0xF8)
+        UP = ((UP_msb << 16) + (UP_lsb << 8) + UP_xlsb) >> (8 - OSS)
+        X1 = (UT - AC6) * AC5 / (2**15); X2 = MC * (2**11) / (X1 + MD if (X1 + MD) != 0 else 1) ; B5 = X1 + X2
+        imu_payload["temperature_bmp"] = (B5 + 8) / (2**4) / 10.0
+        B6 = B5 - 4000; X1 = (B2 * (B6 * B6 / (2**12))) / (2**11); X2 = AC2 * B6 / (2**11); X3 = X1 + X2
+        B3 = (((AC1 * 4 + X3) << OSS) + 2) / 4
+        X1 = AC3 * B6 / (2**13); X2 = (B1 * (B6 * B6 / (2**12))) / (2**16); X3 = ((X1 + X2) + 2) / (2**2)
+        B4 = AC4 * (X3 + 32768) / (2**15); B7 = (UP - B3) * (50000 >> OSS)
+        p = (B7 * 2) / B4 if B4 != 0 and B7 >= 0x80000000 else (B7 / B4) * 2 if B4 != 0 else 0
+        X1 = (p / (2**8))**2; X1 = (X1 * 3038) / (2**16); X2 = (-7357 * p) / (2**16)
+        imu_payload["pressure"] = p + (X1 + X2 + 3791) / (2**4)
+        imu_payload["altitude_bmp"] = 44330 * (1.0 - pow(imu_payload["pressure"] / 101325.0, 1/5.255)) if imu_payload["pressure"] > 0 else 0
+    except Exception as e: pass # print(f"Teach: Error reading BMP180: {e}")
     return imu_payload
 
-# ---------- RECORD SETUP ----------
-class Record:
-    def __init__(self, save_path):
-        self.save_path = save_path
-        self.frame_dir = os.path.join(save_path, "frames")
+# ---------- RECORDING CLASS ----------
+class DataRecorder:
+    def __init__(self, save_path_base, use_ips_flag):
+        self.session_name = time.strftime("%Y%m%d_%H%M%S")
+        self.save_path = os.path.join(save_path_base, self.session_name)
+        self.frame_dir = os.path.join(self.save_path, "frames")
         os.makedirs(self.frame_dir, exist_ok=True)
+        self.use_ips = use_ips_flag
 
-        self.csv_path = os.path.join(save_path, "data.csv")
+        self.csv_path = os.path.join(self.save_path, "data.csv")
+        csv_headers = [
+            "timestamp", "frame_file",
+            "accel_x", "accel_y", "accel_z",
+            "gyro_x", "gyro_y", "gyro_z",
+            "mag_x", "mag_y", "mag_z",
+            "temp_mpu", "temp_bmp", "pressure", "altitude_bmp",
+            "motor_left_dir", "motor_left_speed",
+            "motor_right_dir", "motor_right_speed",
+            "servo1_angle", "servo2_angle", "e_stop_active"
+        ]
+        if self.use_ips:
+            csv_headers.extend(["ips_x", "ips_y", "ips_yaw", "ips_quality"])
+        
         with open(self.csv_path, mode='w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow([
-                "timestamp", "frame_file",
-                "accel_x", "accel_y", "accel_z",
-                "gyro_x", "gyro_y", "gyro_z",
-                "mag_x", "mag_y", "mag_z",
-                "temp_mpu", "temp_bmp", "pressure_hpa", "altitude_bmp", # Changed pressure to pressure_hpa
-                "motor_left_dir", "motor_left_speed",
-                "motor_right_dir", "motor_right_speed",
-                "servo1_angle", "servo2_angle"
-            ])
-
-        self.picam2 = Picamera2()
-        config = self.picam2.create_still_configuration() # Keep original if resolution is important
+            writer.writerow(csv_headers)
+        
+        self.picam2 = Picamera2(camera_num = 1)
+        # Configure for faster still capture, adjust resolution as needed
+        config = self.picam2.create_still_configuration(main={"size": (640, 480)}, lores={"size": (320, 240)}, display="lores")
         self.picam2.configure(config)
         self.picam2.start()
-        print("Picamera2 started.")
+        print(f"Teach: Picamera2 started. Recording session: {self.session_name}")
+        print(f"Teach: Saving data to: {self.save_path}")
 
-    def record_frame(self, imu_data, control_commands):
+    def record_frame(self, imu_data_dict, control_cmd_dict, ips_data_dict):
         timestamp = time.time()
-        frame_filename = f"{timestamp:.3f}.jpg" # Using 3 decimal places for timestamp
+        frame_filename = f"{timestamp:.3f}.jpg" # More precision for filename
         frame_path = os.path.join(self.frame_dir, frame_filename)
         
         try:
-            frame_array = self.picam2.capture_array("main") # Specify "main" stream
+            # Capture to a buffer in a specific format if needed, or directly to file
+            # For speed, capture_array might be faster then saving with PIL
+            frame_array = self.picam2.capture_array("main") # Capture from main stream
+            # if 'cv2' in sys.modules:
+                # frame_array = cv2.flip(frame_array, -1) # Optional flip
 
-            frame_array = cv2.flip(frame_array, -1) 
-            
+            from PIL import Image
             img = Image.fromarray(frame_array)
             img.save(frame_path)
         except Exception as e:
-            print(f"Error capturing/saving frame: {e}")
-            frame_filename = "error"
+            print(f"Teach: Error capturing/saving frame: {e}")
+            frame_filename = "error.jpg"
 
-        cmd_motor_left_dir = control_commands.get("motor_left_dir", 0)
-        cmd_motor_left_speed = control_commands.get("motor_left_speed", 0)
-        cmd_motor_right_dir = control_commands.get("motor_right_dir", 0)
-        cmd_motor_right_speed = control_commands.get("motor_right_speed", 0)
-        cmd_servo1_angle = control_commands.get("servo1_angle", 90)
-        cmd_servo2_angle = control_commands.get("servo2_angle", 90)
+        row_data = [
+            timestamp, frame_filename,
+            imu_data_dict.get("accel_x", 0), imu_data_dict.get("accel_y", 0), imu_data_dict.get("accel_z", 0),
+            imu_data_dict.get("gyro_x", 0), imu_data_dict.get("gyro_y", 0), imu_data_dict.get("gyro_z", 0),
+            imu_data_dict.get("mag_x", 0), imu_data_dict.get("mag_y", 0), imu_data_dict.get("mag_z", 0),
+            imu_data_dict.get("temperature_mpu", 0), imu_data_dict.get("temperature_bmp", 0),
+            imu_data_dict.get("pressure", 0), imu_data_dict.get("altitude_bmp", 0),
+            control_cmd_dict.get("motor_left_dir", 0), control_cmd_dict.get("motor_left_speed", 0),
+            control_cmd_dict.get("motor_right_dir", 0), control_cmd_dict.get("motor_right_speed", 0),
+            control_cmd_dict.get("servo1_angle", 90), control_cmd_dict.get("servo2_angle", 90),
+            control_cmd_dict.get("e_stop_active", 0)
+        ]
+        if self.use_ips:
+            row_data.extend([
+                ips_data_dict.get("ips_x"), # Will be None if not available
+                ips_data_dict.get("ips_y"),
+                ips_data_dict.get("ips_yaw"),
+                ips_data_dict.get("ips_quality")
+            ])
 
         with open(self.csv_path, mode='a', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow([
-                timestamp, frame_filename,
-                imu_data.get("accel_x", 0), imu_data.get("accel_y", 0), imu_data.get("accel_z", 0),
-                imu_data.get("gyro_x", 0), imu_data.get("gyro_y", 0), imu_data.get("gyro_z", 0),
-                imu_data.get("mag_x", 0), imu_data.get("mag_y", 0), imu_data.get("mag_z", 0),
-                imu_data.get("temperature_mpu", 0), 
-                imu_data.get("temperature_bmp", -1), # Default to -1 if error
-                imu_data.get("pressure", -1),       # Already pressure_hpa
-                imu_data.get("altitude_bmp", -1),   # Default to -1 if error
-                cmd_motor_left_dir, cmd_motor_left_speed,
-                cmd_motor_right_dir, cmd_motor_right_speed,
-                cmd_servo1_angle, cmd_servo2_angle
-            ])
+            writer.writerow(row_data)
 
     def close(self):
         if hasattr(self, 'picam2') and self.picam2:
             self.picam2.stop()
-            print("Picamera2 stopped.")
+            print("Teach: Picamera2 stopped.")
 
-# ---------- MAIN ----------
-SAVE_DIR = "dataset_teach"
-SESSION_NAME = time.strftime("%Y%m%d_%H%M%S")
-SAVE_PATH = os.path.join(SAVE_DIR, SESSION_NAME)
+# ---------- REDIS CLIENT SETUP and MAIN ----------
 
-def main_teach():
-    # It's better to create SAVE_PATH only if IMU and Camera initialize successfully
-    # For now, keep as is.
-    os.makedirs(SAVE_PATH, exist_ok=True) 
+
+
+def read_redis_streams():
+    global latest_control_commands, latest_ips_data, USE_IPS_FLAG # Đảm bảo USE_IPS_FLAG có thể truy cập
+
+    if not redis_client:
+        return
+
+    # Tạo dictionary streams để đọc, luôn dùng '>' làm ID cho XREADGROUP
+    streams_to_read_with_group = {}
     
-    setup_imu() # Initialize IMU sensors
+    # Luôn đọc từ control stream nếu redis_client tồn tại
+    streams_to_read_with_group[CONTROL_STREAM_NAME] = '>'
     
-    # Check if BMP180 calibration failed critically. You might choose to exit.
-    if not BMP180_CALIBRATION_OK:
-        print("[CRITICAL] BMP180 calibration failed. Data for BMP180 will be invalid. Consider stopping.")
-        # return # Optionally exit if BMP180 is critical for your application
+    if USE_IPS_FLAG:
+        streams_to_read_with_group[IPS_STREAM_NAME] = '>'
+    
+    # Xử lý groupname cho xreadgroup khi đọc nhiều stream.
+    # XREADGROUP chỉ cho phép đọc từ một group tại một thời điểm cho nhiều stream.
+    # Điều này có nghĩa là tất cả các stream bạn đọc trong một lệnh XREADGROUP
+    # phải thuộc về cùng một consumer group HOẶC bạn phải gọi XREADGROUP riêng cho từng group.
+    # Nếu CONTROL_STREAM_NAME và IPS_STREAM_NAME dùng chung group thì ổn.
+    # Nếu chúng dùng group khác nhau (TEACH_CONSUMER_GROUP_CONTROL và TEACH_CONSUMER_GROUP_IPS)
+    # bạn cần gọi XREADGROUP hai lần.
+    
+    # Giả định hiện tại là mỗi stream có group riêng như đã setup:
+    # TEACH_CONSUMER_GROUP_CONTROL cho CONTROL_STREAM_NAME
+    # TEACH_CONSUMER_GROUP_IPS cho IPS_STREAM_NAME
+    # Chúng ta sẽ đọc từng stream một nếu chúng thuộc các group khác nhau.
 
-    recorder = None # Initialize to None
-    server_socket = None # Initialize to None
+    # Đọc từ CONTROL_STREAM_NAME
     try:
-        recorder = Record(save_path=SAVE_PATH)
-        print(f"[INFO] Recording session: {SESSION_NAME}")
-        print(f"[INFO] Saving data to: {SAVE_PATH}")
-        print(f"[INFO] Waiting for control commands on socket: {SOCKET_PATH}")
-        print("[INFO] Press Ctrl+C to stop.")
+        control_messages = redis_client.xreadgroup(
+            groupname=TEACH_CONSUMER_GROUP_CONTROL,
+            consumername=TEACH_CONSUMER_NAME,
+            streams={CONTROL_STREAM_NAME: '>'}, # Chỉ đọc từ stream này với ID '>'
+            count=5, # Đọc tối đa 5 message mỗi lần
+            block=1 # Block tối đa 1ms nếu không có message (để không làm treo vòng lặp chính quá lâu)
+        )
 
-        if os.path.exists(SOCKET_PATH):
-            os.remove(SOCKET_PATH)
+        if control_messages:
+            for stream_name_bytes, message_list in control_messages: # stream_name_bytes sẽ là CONTROL_STREAM_NAME
+                for message_id_bytes, data_bytes_dict in message_list:
+                    # print(f"Teach: Received from CONTROL (ID: {message_id_bytes.decode()}): {data_bytes_dict}") # Debug
+                    latest_control_commands["motor_left_dir"] = int(data_bytes_dict.get(b'motor_left_dir', b'0'))
+                    latest_control_commands["motor_left_speed"] = int(data_bytes_dict.get(b'motor_left_speed', b'0'))
+                    latest_control_commands["motor_right_dir"] = int(data_bytes_dict.get(b'motor_right_dir', b'0'))
+                    latest_control_commands["motor_right_speed"] = int(data_bytes_dict.get(b'motor_right_speed', b'0'))
+                    latest_control_commands["servo1_angle"] = int(data_bytes_dict.get(b'servo1_angle', b'90'))
+                    latest_control_commands["servo2_angle"] = int(data_bytes_dict.get(b'servo2_angle', b'90'))
+                    latest_control_commands["e_stop_active"] = int(data_bytes_dict.get(b'e_stop_active', b'0'))
+                    redis_client.xack(CONTROL_STREAM_NAME, TEACH_CONSUMER_GROUP_CONTROL, message_id_bytes)
+    except redis.exceptions.RedisError as e:
+        print(f"Teach: Redis error reading CONTROL stream: {e}")
+    except Exception as e:
+        print(f"Teach: Error processing CONTROL Redis messages: {e}")
+
+
+    # Đọc từ IPS_STREAM_NAME nếu USE_IPS_FLAG là True
+    if USE_IPS_FLAG:
+        try:
+            ips_messages = redis_client.xreadgroup(
+                groupname=TEACH_CONSUMER_GROUP_IPS,
+                consumername=TEACH_CONSUMER_NAME,
+                streams={IPS_STREAM_NAME: '>'}, # Chỉ đọc từ stream này với ID '>'
+                count=5,
+                block=1 # Block tối đa 1ms
+            )
+
+            if ips_messages:
+                for stream_name_bytes, message_list in ips_messages: # stream_name_bytes sẽ là IPS_STREAM_NAME
+                    for message_id_bytes, data_bytes_dict in message_list:
+                        # print(f"Teach: Received from IPS (ID: {message_id_bytes.decode()}): {data_bytes_dict}") # Debug
+                        latest_ips_data["ips_x"] = float(data_bytes_dict.get(b'ips_x', b'0.0'))
+                        latest_ips_data["ips_y"] = float(data_bytes_dict.get(b'ips_y', b'0.0'))
+                        latest_ips_data["ips_yaw"] = float(data_bytes_dict.get(b'ips_yaw', b'0.0'))
+                        latest_ips_data["ips_quality"] = float(data_bytes_dict.get(b'ips_quality', b'0.0'))
+                        redis_client.xack(IPS_STREAM_NAME, TEACH_CONSUMER_GROUP_IPS, message_id_bytes)
+        except redis.exceptions.RedisError as e:
+            print(f"Teach: Redis error reading IPS stream: {e}")
+        except Exception as e:
+            print(f"Teach: Error processing IPS Redis messages: {e}")
+
+# Trong hàm setup_redis_for_teach():
+# Bỏ các dòng gán last_control_id = '$' và last_ips_id = '$' đi.
+# Việc tạo group với id='0' là đúng để group bắt đầu theo dõi từ đầu stream (nếu stream mới hoặc consumer mới).
+# Sau đó, khi đọc, consumer sẽ dùng '>' để lấy message mới cho nó.
+
+def setup_redis_for_teach():
+    global redis_client # Bỏ last_control_id, last_ips_id khỏi global nếu không dùng nữa
+    try:
+        print("Teach: Connecting to Redis...")
+        redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
+        redis_client.ping()
+        print("Teach: Redis connection established.")
+
+        # Setup for CONTROL stream
+        try:
+            redis_client.xgroup_create(name=CONTROL_STREAM_NAME, groupname=TEACH_CONSUMER_GROUP_CONTROL, id='0', mkstream=True)
+            print(f"Teach: Consumer group '{TEACH_CONSUMER_GROUP_CONTROL}' ensured for '{CONTROL_STREAM_NAME}'.")
+        except redis.exceptions.ResponseError as e:
+            if "BUSYGROUP" in str(e): 
+                print(f"Teach: Consumer group '{TEACH_CONSUMER_GROUP_CONTROL}' already exists for '{CONTROL_STREAM_NAME}'.")
+            else: raise
         
-        server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        server_socket.bind(SOCKET_PATH)
-        server_socket.setblocking(False)
+        # Setup for IPS stream
+        try:
+            redis_client.xgroup_create(name=IPS_STREAM_NAME, groupname=TEACH_CONSUMER_GROUP_IPS, id='0', mkstream=True)
+            print(f"Teach: Consumer group '{TEACH_CONSUMER_GROUP_IPS}' ensured for '{IPS_STREAM_NAME}'.")
+        except redis.exceptions.ResponseError as e:
+            if "BUSYGROUP" in str(e): 
+                print(f"Teach: Consumer group '{TEACH_CONSUMER_GROUP_IPS}' already exists for '{IPS_STREAM_NAME}'.")
+            else: raise
+        return True
+    except Exception as e:
+        print(f"Teach: Failed to connect/setup Redis: {e}")
+        return False
 
-        latest_control_commands = {
-            "motor_left_dir": 0, "motor_left_speed": 0,
-            "motor_right_dir": 0, "motor_right_speed": 0,
-            "servo1_angle": 90, "servo2_angle": 90
-        }
 
-        loop_count = 0
+# --- Main Teach Phase Logic ---
+SAVE_DIR_BASE = "T_R_navigation_method/dataset_teach"
+# THIS FLAG CONTROLS IPS USAGE
+USE_IPS_FLAG = False # Set to True if you have an ips.py publishing to IPS_STREAM_NAME
+
+def main_teach_phase():
+    global last_control_id, last_ips_id # Ensure these are accessible
+
+    if not setup_redis_for_teach():
+        print("Teach: Could not connect to Redis. Exiting teach phase.")
+        return
+
+    setup_imu()
+    recorder = DataRecorder(save_path_base=SAVE_DIR_BASE, use_ips_flag=USE_IPS_FLAG)
+    
+    # Initialize last IDs to '>' to only get new messages after starting this consumer
+    # Or, if you want to process messages this consumer might have missed if it restarted,
+    # you'd read with '0' in xreadgroup and rely on XACK.
+    # For simplicity, if this is the only consumer in the group, '>' for new messages is fine.
+    # The XGROUP CREATE with '0' sets the starting point for the group.
+    # When a consumer reads with '>', it gets messages not yet delivered to *any* consumer in that group.
+    # If it's the only consumer, this means all new messages.
+    # Let's adjust to use the group's perspective with '>'
+    
+    # For XREADGROUP, the ID in streams dict for XREADGROUP should be '>'
+    # to get messages not yet delivered to this consumer in this group.
+    # The `last_control_id` and `last_ips_id` are not strictly needed
+    # if using XREADGROUP with '>' and XACKing.
+    # The '0' in XGROUP CREATE establishes the group's starting point.
+    # The '>' in XREADGROUP means "new messages for this consumer".
+
+    print("[INFO] Teach phase started. Press Ctrl+C to stop.")
+    log_interval = 0.1 # Log data every 0.1 seconds (10 Hz)
+    last_log_time = time.time()
+
+    try:
         while True:
-            ready_to_read, _, _ = select.select([server_socket], [], [], 0.01)
-            if ready_to_read:
-                try:
-                    data, _ = server_socket.recvfrom(1024)
-                    parts = data.decode().strip().split(':')
-                    if len(parts) == 6:
-                        latest_control_commands["motor_left_dir"] = int(parts[0])
-                        latest_control_commands["motor_left_speed"] = int(parts[1])
-                        latest_control_commands["motor_right_dir"] = int(parts[2])
-                        latest_control_commands["motor_right_speed"] = int(parts[3])
-                        latest_control_commands["servo1_angle"] = int(parts[4])
-                        latest_control_commands["servo2_angle"] = int(parts[5])
-                except BlockingIOError:
-                    pass 
-                except Exception as e:
-                    print(f"Error receiving/parsing control commands: {e}")
+            current_time = time.time()
             
-            imu_data = get_imu_data()
-            recorder.record_frame(imu_data, latest_control_commands)
+            # Read from Redis streams non-blockingly or with short block
+            read_redis_streams() # This updates latest_control_commands and latest_ips_data
+
+            if current_time - last_log_time >= log_interval:
+                imu_data = get_imu_data()
+
+
+
+                print(f"--- IMU Data at {current_time:.2f} ---")
+                print(f"  Accel (X,Y,Z): ({imu_data.get('accel_x', 0):.2f}, {imu_data.get('accel_y', 0):.2f}, {imu_data.get('accel_z', 0):.2f}) g")
+                print(f"  Gyro (X,Y,Z):  ({imu_data.get('gyro_x', 0):.2f}, {imu_data.get('gyro_y', 0):.2f}, {imu_data.get('gyro_z', 0):.2f}) deg/s")
+                print(f"  Mag (X,Y,Z):   ({imu_data.get('mag_x', 0):.2f}, {imu_data.get('mag_y', 0):.2f}, {imu_data.get('mag_z', 0):.2f}) uT") # Đơn vị có thể khác tùy scale factor
+                print(f"  Temp MPU:      {imu_data.get('temperature_mpu', 0):.2f} C")
+                print(f"  Temp BMP:      {imu_data.get('temperature_bmp', 0):.2f} C")
+                print(f"  Pressure:      {imu_data.get('pressure', 0):.0f} Pa")
+                print(f"  Altitude BMP:  {imu_data.get('altitude_bmp', 0):.2f} m")
+                print(f"  Control CMDs:  {latest_control_commands}")
+                if USE_IPS_FLAG:
+                   print(f"  IPS Data:      {latest_ips_data}")
+                print("-------------------------")
+
+
+
+
+                recorder.record_frame(imu_data, latest_control_commands, latest_ips_data)
+                # print(f"Logged at {current_time:.2f}") # Debug
+                last_log_time = current_time
             
-            # Print IMU data periodically for debugging, e.g., every 20 loops (2 seconds if 0.1s sleep)
-            # Print IMU data periodically for debugging
-            if loop_count % 20 == 0:
-                print(f"--- GY-87 IMU Data ---")
-                print(f"  MPU6050:")
-                print(f"    Accel (X,Y,Z): {imu_data.get('accel_x', 0):.2f}g, {imu_data.get('accel_y', 0):.2f}g, {imu_data.get('accel_z', 0):.2f}g")
-                print(f"    Gyro  (X,Y,Z): {imu_data.get('gyro_x', 0):.2f}dps, {imu_data.get('gyro_y', 0):.2f}dps, {imu_data.get('gyro_z', 0):.2f}dps")
-                print(f"    Temp:          {imu_data.get('temperature_mpu', -1):.2f}C")
-                print(f"  HMC5883L:")
-                
-                print(f"    Mag   (X,Y,Z): {imu_data.get('mag_x', 0):.2f}mG, {imu_data.get('mag_y', 0):.2f}mG, {imu_data.get('mag_z', 0):.2f}mG")
-                print(f"  BMP180:")
-                print(f"    Temp:          {imu_data.get('temperature_bmp', -1):.2f}C")
-                print(f"    Pressure:      {imu_data.get('pressure', -1):.2f}hPa")
-                print(f"    Altitude:      {imu_data.get('altitude_bmp', -1):.2f}m")
-                print(f"----------------------")
-            loop_count += 1
-            time.sleep(0.1) # Adjust rate as needed
+            # Adjust sleep to control overall loop rate, considering log_interval
+            # If log_interval is 0.1, sleeping for 0.01 ensures Redis is checked frequently
+            time.sleep(0.01) 
 
     except KeyboardInterrupt:
-        print("\n[INFO] Recording stopped by user.")
+        print("\n[INFO] Teach phase stopped by user.")
     except Exception as e:
-        print(f"[ERROR] An unexpected error occurred in main_teach: {e}")
-        import traceback
-        traceback.print_exc() # Print full traceback for unexpected errors
+        print(f"[ERROR] An unexpected error occurred in main_teach_phase: {e}")
     finally:
-        print("[INFO] Cleaning up...")
-        if recorder: # Check if recorder was successfully initialized
+        print("[INFO] Teach: Cleaning up...")
+        if 'recorder' in locals() and recorder:
             recorder.close()
-        if server_socket: # Check if server_socket was successfully initialized
-            server_socket.close()
-        if os.path.exists(SOCKET_PATH):
-            try:
-                os.remove(SOCKET_PATH)
-            except OSError as e:
-                print(f"Error removing socket file: {e}")
+        if redis_client:
+            # Optional: Remove consumer from group if desired, or just close connection
+            # try:
+            #     if redis_client.exists(CONTROL_STREAM_NAME):
+            #        redis_client.xgroup_delconsumer(CONTROL_STREAM_NAME, TEACH_CONSUMER_GROUP_CONTROL, TEACH_CONSUMER_NAME)
+            #     if USE_IPS_FLAG and redis_client.exists(IPS_STREAM_NAME):
+            #        redis_client.xgroup_delconsumer(IPS_STREAM_NAME, TEACH_CONSUMER_GROUP_IPS, TEACH_CONSUMER_NAME)
+            # except Exception as e_del_consumer:
+            #     print(f"Teach: Error deleting consumer from group: {e_del_consumer}")
+            redis_client.close() # Close the connection
+            print("Teach: Redis connection closed.")
         print("[INFO] Teach phase cleanup complete.")
 
 if __name__ == "__main__":
-    # Before starting, it's a good idea to run i2cdetect
-    print("Please ensure I2C is enabled and sensors are connected.")
-    print("Run 'sudo i2cdetect -y 1' (or -y 0 for old Pi models) to check for sensor addresses:")
-    print("  MPU6050: 0x68, HMC5883L: 0x1e, BMP180: 0x77")
-    # input("Press Enter to continue if sensors are detected...") # Optional pause
-    main_teach()
+    # Example: Check for a command-line argument to enable IPS
+    if len(sys.argv) > 1 and sys.argv[1].lower() == '--use-ips':
+        USE_IPS_FLAG = True
+        print("Teach: IPS data collection ENABLED via command-line argument.")
+    else:
+        USE_IPS_FLAG = False # Default
+        print("Teach: IPS data collection DISABLED. To enable, run with --use-ips argument.")
+        
+    main_teach_phase()

@@ -95,6 +95,7 @@ def send_uart_command(command_string):
         try:
             # print(f"UART_Sender: Sending to Master: {command_string}") # Debug
             ser_master.write(command_string.encode('utf-8') + b'\n')
+            time.sleep(0.05)
         except Exception as e:
             print(f"UART_Sender: Error writing to serial port {SERIAL_PORT_MASTER}: {e}")
 

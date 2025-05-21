@@ -3,13 +3,13 @@ import struct
 import pickle
 import cv2
 from picamera2 import Picamera2
-cam_inx = 0
+cam_inx = 1
 # Initialize Picamera2
 picam2 = Picamera2(camera_num=cam_inx)
-picam2.preview_configuration.main.size = (640, 480)
+# picam2.preview_configuration.main.size = (640, 480)
 picam2.preview_configuration.main.format = "RGB888"
 picam2.preview_configuration.controls.FrameRate = 30
-picam2.configure("preview")
+picam2.configure("video")
 picam2.start()
 
 # Set up socket
@@ -24,7 +24,8 @@ print("? Connected to:", addr)
 while True:
     frame = picam2.capture_array()
     # ? Flip the frame using OpenCV
-    frame = cv2.flip(frame, -1)  # Flip both horizontally & vertically (Rotate 180)
+    if not cam_inx:
+        frame = cv2.flip(frame, -1)  # Flip both horizontally & vertically (Rotate 180)
     # Use cv2.flip(frame, 1) for horizontal flip
     # Use cv2.flip(frame, 0) for vertical flip
 

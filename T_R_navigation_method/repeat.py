@@ -8,6 +8,7 @@ import csv
 import smbus # For I2C with IMU
 import redis # For publishing commands
 import math
+import numpy as np
 import sys   # For command line arguments and exit
 from ahrs.filters import Madgwick # Assuming you installed this library
 
@@ -57,6 +58,8 @@ except TypeError:
     ahrs_filter = Madgwick(beta=0.1) # Hoặc Madgwick(gain=0.1) tùy thư viện
 
 last_ahrs_update_time = 0.0
+current_quaternion_ahrs = np.array([1.0, 0.0, 0.0, 0.0]) # w, x, y, z - DẠNG NUMPY ARRAY
+
 
 # --- IMU Helper Functions (Your complete functions go here) ---
 def read_signed_word(bus_obj, addr, reg):
@@ -263,7 +266,7 @@ class SimplePID:
 
 # --- Main Repeat Logic ---
 def main_repeat_phase(session_to_repeat_path, use_ips_from_log_flag):
-    global ahrs_filter, last_ahrs_update_time # Ensure ahrs_filter is accessible
+    global ahrs_filter, last_ahrs_update_time, current_quaternion_ahrs # Thêm current_quaternion_ahrs
 
     log_file_path = os.path.join(session_to_repeat_path, "data.csv")
     if not os.path.exists(log_file_path):
@@ -333,7 +336,7 @@ def main_repeat_phase(session_to_repeat_path, use_ips_from_log_flag):
 
             # --- Target Yaw from log (IMPORTANT: How do you define this?) ---
             # Option A: If you logged an absolute fused yaw during teach:
-            # target_absolute_yaw = log_entry.get('fused_yaw_deg', None) 
+            target_absolute_yaw = log_entry.get('fused_yaw_deg', None) 
             # Option B: If you want to replicate yaw rate changes:
             target_yaw_rate_from_log = log_entry.get('gyro_z', 0.0) # In deg/s
 
@@ -350,39 +353,73 @@ def main_repeat_phase(session_to_repeat_path, use_ips_from_log_flag):
             
             live_imu = get_live_imu_data()
 
-            gyro_rad_s = [math.radians(live_imu.get('gyro_x',0.0)), math.radians(live_imu.get('gyro_y',0.0)), math.radians(live_imu.get('gyro_z',0.0))]
-            accel_g = [live_imu.get('accel_x',0.0), live_imu.get('accel_y',0.0), live_imu.get('accel_z',1.0)] # Default Z to 1g if missing
-            mag_uT = [live_imu.get('mag_x',0.1), live_imu.get('mag_y',0.0), live_imu.get('mag_z',0.0)] # Default non-zero X mag
-
-            # Update Madgwick filter
-            # Ensure your ahrs_filter object is correctly named and used
-            # The update method might vary based on the specific MadgwickAHRS library version
+            gyro_np = np.array([
+                math.radians(live_imu.get('gyro_x',0.0)),
+                math.radians(live_imu.get('gyro_y',0.0)),
+                math.radians(live_imu.get('gyro_z',0.0))
+            ])
+            accel_np = np.array([
+                live_imu.get('accel_x',0.0),
+                live_imu.get('accel_y',0.0),
+                live_imu.get('accel_z',1.0)
+            ])
+            mag_np = np.array([
+                live_imu.get('mag_x',0.1),
+                live_imu.get('mag_y',0.0),
+                live_imu.get('mag_z',0.0)
+            ])
+            # Cập nhật bộ lọc Madgwick
+            # Dựa trên ví dụ bạn cung cấp: madgwick.updateMARG(Q[t-1], gyr=..., acc=..., mag=...)
             try:
-                # Nếu hàm update của thư viện có tham số dt:
-                if 'dt' in ahrs_filter.update.__code__.co_varnames:
-                     ahrs_filter.update(acc=accel_g, gyr=gyro_rad_s, mag=mag_uT, dt=dt)
-                else:
-                # Nếu không, giả sử nó dùng sample_period đã set khi khởi tạo
-                     ahrs_filter.update(acc=accel_g, gyr=gyro_rad_s, mag=mag_uT)
-            except AttributeError:
-                print("Repeat: Madgwick object does not have 'update' method as expected. Check library.")
-                # Xử lý lỗi hoặc dùng phương thức thay thế nếu biết
-                # Ví dụ, một số thư viện cũ hơn có thể dùng update_MARG hoặc update_imu
-                # ahrs_filter.update_imu(gyr=gyro_rad_s, acc=accel_g, dt=dt) # Nếu chỉ dùng 6DOF
+                # Nếu Madgwick được khởi tạo với sample_period, nó có thể không cần dt ở đây.
+                # Nếu không, nó sẽ cần dt.
+                # Tên tham số cho quaternion cũ có thể là 'q', 'Q', hoặc không có tên (tham số vị trí).
+                # Giả sử là tham số vị trí đầu tiên như trong ví dụ `Q[t-1]` của bạn.
+                
+                # Kiểm tra xem hàm updateMARG có nhận 'dt' không.
+                # Đây là cách kiểm tra hơi phức tạp, cách đơn giản là thử và bắt TypeError
+                # has_dt_param = 'dt' in ahrs_filter.updateMARG.__code__.co_varnames
+                
+                # new_q_np = ahrs_filter.updateMARG(current_quaternion_ahrs, gyr=gyro_np, acc=accel_np, mag=mag_np, dt=dt)
+                # Hoặc nếu thư viện dùng sample_period đã set và không cần dt ở update:
+                new_q_np = ahrs_filter.updateMARG(current_quaternion_ahrs, gyr=gyro_np, acc=accel_np, mag=mag_np)
 
+                if new_q_np is not None and isinstance(new_q_np, np.ndarray) and new_q_np.shape == (4,):
+                    current_quaternion_ahrs = new_q_np
+                # Một số thư viện có thể cập nhật thuộc tính .Q nội bộ thay vì trả về
+                elif hasattr(ahrs_filter, 'Q') and isinstance(ahrs_filter.Q, np.ndarray) and ahrs_filter.Q.shape == (4,):
+                    current_quaternion_ahrs = ahrs_filter.Q
+                # else:
+                    # print("Repeat: Madgwick updateMARG did not return a valid quaternion and .Q is not as expected.")
 
-              # Lấy quaternion từ bộ lọc
-            quaternion = ahrs_filter.Q if hasattr(ahrs_filter, 'Q') else [1.0, 0.0, 0.0, 0.0]
-            
-            # Chuyển quaternion sang góc Euler (roll, pitch, yaw) - đơn vị độ
+            except TypeError as te:
+                # Nếu lỗi TypeError, có thể do thiếu/thừa tham số dt
+                print(f"Repeat: TypeError calling updateMARG. Trying with/without dt or checking method signature. Error: {te}")
+                # Ví dụ, thử gọi với dt nếu trước đó không có, hoặc ngược lại
+                try:
+                    # Giả sử nếu lỗi là do thiếu dt, thư viện sẽ có tham số dt
+                    new_q_np = ahrs_filter.updateMARG(current_quaternion_ahrs, gyr=gyro_np, acc=accel_np, mag=mag_np, dt=dt)
+                    if new_q_np is not None: current_quaternion_ahrs = new_q_np
+                except Exception as e_fallback:
+                    print(f"Repeat: Fallback updateMARG call also failed: {e_fallback}")
+            except Exception as e_ahrs:
+                print(f"Repeat: Error updating AHRS: {e_ahrs}")
             # (Giữ nguyên phần chuyển đổi quaternion sang Euler bạn đã có)
-            q0, q1, q2, q3 = quaternion[0], quaternion[1], quaternion[2], quaternion[3]
+        
+            # Chuyển quaternion (NumPy array) sang góc Euler
+            q0, q1, q2, q3 = current_quaternion_ahrs[0], current_quaternion_ahrs[1], current_quaternion_ahrs[2], current_quaternion_ahrs[3]
+
             roll_rad = math.atan2(2 * (q0 * q1 + q2 * q3), 1 - 2 * (q1**2 + q2**2))
             pitch_rad = math.asin(max(-1.0, min(1.0, 2 * (q0 * q2 - q3 * q1))))
             yaw_rad = math.atan2(2 * (q0 * q3 + q1 * q2), 1 - 2 * (q2**2 + q3**2))
 
-
+            siny_cosp = 2 * (q0 * q3 + q1 * q2)
+            cosy_cosp = 1 - 2 * (q2**2 + q3**2)
+            yaw_rad = math.atan2(siny_cosp, cosy_cosp)
+            live_fused_yaw_deg = math.degrees(yaw_rad)
             if live_fused_yaw_deg < 0: live_fused_yaw_deg += 360
+            
+
 
 
             # --- PID Correction for Yaw ---

@@ -1,6 +1,6 @@
 # teach.py
 # Logs IMU data, Camera images, Control Commands (from Redis), and IPS data (from Redis).
-
+from ahrs.filters import Madgwick
 import os
 import time
 import csv
@@ -9,7 +9,49 @@ import smbus # For I2C with IMU
 import redis # For IPC with control_processor.py and ips.py
 import select # For non-blocking socket/stream read (not directly used with redis-py xread)
 import sys
+import math
+import numpy as np
 # import cv2 # Uncomment if you use cv2.flip and have it installed
+
+# --- Madgwick Filter Setup ---
+# Với thư viện ahrs của Mayitzin, bạn thường cung cấp tần suất (frequency)
+# hoặc chu kỳ lấy mẫu (sample_period) khi khởi tạo.
+# Hoặc, một số hàm update của nó có thể nhận dt.
+
+# Giả sử tần suất vòng lặp chính của bạn (do log_interval kiểm soát việc ghi log,
+# nhưng vòng lặp while True có thể chạy nhanh hơn để cập nhật Madgwick)
+# là khoảng 50Hz.
+TARGET_LOOP_RATE = 50.0  # Hz, tần suất bạn muốn cập nhật AHRS
+SAMPLE_PERIOD = 1.0 / TARGET_LOOP_RATE
+
+
+# Khởi tạo bộ lọc Madgwick
+# Tham số 'beta' (hoặc 'gain' trong một số phiên bản/thuật toán khác) cần được tune.
+# Tham khảo tài liệu của thư viện 'ahrs' để xem các tham số khởi tạo chính xác.
+# Ví dụ, nó có thể yêu cầu 'frequency' hoặc 'sample_period', 'beta' (hoặc 'gain').
+# Nếu không có 'sample_period' trực tiếp, hàm update có thể cần 'dt'.
+try:
+    # Thử khởi tạo với các tham số phổ biến như 'frequency' hoặc 'sample_period' và 'beta'/'gain'
+    # Ví dụ, nếu thư viện dùng 'frequency':
+    # ahrs_filter = Madgwick(frequency=TARGET_LOOP_RATE, beta=0.1)
+    # Hoặc nếu dùng 'sample_period':
+    ahrs_filter = Madgwick(sample_period=SAMPLE_PERIOD, beta=0.1)
+except TypeError:
+    # Nếu cách trên không đúng, thử cách khởi tạo cơ bản hơn và truyền dt vào update
+    ahrs_filter = Madgwick(beta=0.1) # beta là gain của bộ lọc
+    print("Teach: MadgwickAHRS initialized without sample_period, will pass dt to update.")
+
+
+last_ahrs_update_time = 0.0 # Sẽ được khởi tạo lại trong main_teach_phase
+
+
+# Biến lưu trữ quaternion hiện tại (khởi tạo với identity quaternion: w, x, y, z)
+current_quaternion = [1.0, 0.0, 0.0, 0.0]
+# Biến lưu trữ yaw đã lọc cuối cùng
+current_fused_yaw_deg = 0.0
+# Thời gian cập nhật AHRS lần cuối
+last_ahrs_update_time = 0.0
+
 
 # ---------- Redis Configuration ----------
 REDIS_HOST = 'localhost'
@@ -218,6 +260,7 @@ class DataRecorder:
             "gyro_x", "gyro_y", "gyro_z",
             "mag_x", "mag_y", "mag_z",
             "temp_mpu", "temp_bmp", "pressure", "altitude_bmp",
+            "fused_yaw_deg",
             "motor_left_dir", "motor_left_speed",
             "motor_right_dir", "motor_right_speed",
             "servo1_angle", "servo2_angle", "e_stop_active"
@@ -237,9 +280,9 @@ class DataRecorder:
         print(f"Teach: Picamera2 started. Recording session: {self.session_name}")
         print(f"Teach: Saving data to: {self.save_path}")
 
-    def record_frame(self, imu_data_dict, control_cmd_dict, ips_data_dict):
+    def record_frame(self, imu_data_dict, control_cmd_dict, ips_data_dict, current_fused_yaw):
         timestamp = time.time()
-        frame_filename = f"{timestamp:.3f}.jpg" # More precision for filename
+        frame_filename = f"{timestamp:.4f}.jpg" # More precision for filename
         frame_path = os.path.join(self.frame_dir, frame_filename)
         
         try:
@@ -263,6 +306,7 @@ class DataRecorder:
             imu_data_dict.get("mag_x", 0), imu_data_dict.get("mag_y", 0), imu_data_dict.get("mag_z", 0),
             imu_data_dict.get("temperature_mpu", 0), imu_data_dict.get("temperature_bmp", 0),
             imu_data_dict.get("pressure", 0), imu_data_dict.get("altitude_bmp", 0),
+            current_fused_yaw, # Ghi giá trị yaw đã lọc
             control_cmd_dict.get("motor_left_dir", 0), control_cmd_dict.get("motor_left_speed", 0),
             control_cmd_dict.get("motor_right_dir", 0), control_cmd_dict.get("motor_right_speed", 0),
             control_cmd_dict.get("servo1_angle", 90), control_cmd_dict.get("servo2_angle", 90),
@@ -270,10 +314,8 @@ class DataRecorder:
         ]
         if self.use_ips:
             row_data.extend([
-                ips_data_dict.get("ips_x"), # Will be None if not available
-                ips_data_dict.get("ips_y"),
-                ips_data_dict.get("ips_yaw"),
-                ips_data_dict.get("ips_quality")
+                ips_data_dict.get("ips_x"), ips_data_dict.get("ips_y"),
+                ips_data_dict.get("ips_yaw"), ips_data_dict.get("ips_quality")
             ])
 
         with open(self.csv_path, mode='a', newline='') as f:
@@ -303,19 +345,7 @@ def read_redis_streams():
     
     if USE_IPS_FLAG:
         streams_to_read_with_group[IPS_STREAM_NAME] = '>'
-    
-    # Xử lý groupname cho xreadgroup khi đọc nhiều stream.
-    # XREADGROUP chỉ cho phép đọc từ một group tại một thời điểm cho nhiều stream.
-    # Điều này có nghĩa là tất cả các stream bạn đọc trong một lệnh XREADGROUP
-    # phải thuộc về cùng một consumer group HOẶC bạn phải gọi XREADGROUP riêng cho từng group.
-    # Nếu CONTROL_STREAM_NAME và IPS_STREAM_NAME dùng chung group thì ổn.
-    # Nếu chúng dùng group khác nhau (TEACH_CONSUMER_GROUP_CONTROL và TEACH_CONSUMER_GROUP_IPS)
-    # bạn cần gọi XREADGROUP hai lần.
-    
-    # Giả định hiện tại là mỗi stream có group riêng như đã setup:
-    # TEACH_CONSUMER_GROUP_CONTROL cho CONTROL_STREAM_NAME
-    # TEACH_CONSUMER_GROUP_IPS cho IPS_STREAM_NAME
-    # Chúng ta sẽ đọc từng stream một nếu chúng thuộc các group khác nhau.
+
 
     # Đọc từ CONTROL_STREAM_NAME
     try:
@@ -370,10 +400,6 @@ def read_redis_streams():
         except Exception as e:
             print(f"Teach: Error processing IPS Redis messages: {e}")
 
-# Trong hàm setup_redis_for_teach():
-# Bỏ các dòng gán last_control_id = '$' và last_ips_id = '$' đi.
-# Việc tạo group với id='0' là đúng để group bắt đầu theo dõi từ đầu stream (nếu stream mới hoặc consumer mới).
-# Sau đó, khi đọc, consumer sẽ dùng '>' để lấy message mới cho nó.
 
 def setup_redis_for_teach():
     global redis_client # Bỏ last_control_id, last_ips_id khỏi global nếu không dùng nữa
@@ -406,6 +432,14 @@ def setup_redis_for_teach():
         return False
 
 
+
+
+
+
+
+
+
+
 # --- Main Teach Phase Logic ---
 SAVE_DIR_BASE = "T_R_navigation_method/dataset_teach"
 # THIS FLAG CONTROLS IPS USAGE
@@ -419,63 +453,124 @@ def main_teach_phase():
         return
 
     setup_imu()
+    last_ahrs_update_time = time.monotonic()
     recorder = DataRecorder(save_path_base=SAVE_DIR_BASE, use_ips_flag=USE_IPS_FLAG)
     
-    # Initialize last IDs to '>' to only get new messages after starting this consumer
-    # Or, if you want to process messages this consumer might have missed if it restarted,
-    # you'd read with '0' in xreadgroup and rely on XACK.
-    # For simplicity, if this is the only consumer in the group, '>' for new messages is fine.
-    # The XGROUP CREATE with '0' sets the starting point for the group.
-    # When a consumer reads with '>', it gets messages not yet delivered to *any* consumer in that group.
-    # If it's the only consumer, this means all new messages.
-    # Let's adjust to use the group's perspective with '>'
-    
-    # For XREADGROUP, the ID in streams dict for XREADGROUP should be '>'
-    # to get messages not yet delivered to this consumer in this group.
-    # The `last_control_id` and `last_ips_id` are not strictly needed
-    # if using XREADGROUP with '>' and XACKing.
-    # The '0' in XGROUP CREATE establishes the group's starting point.
-    # The '>' in XREADGROUP means "new messages for this consumer".
+
 
     print("[INFO] Teach phase started. Press Ctrl+C to stop.")
     log_interval = 0.1 # Log data every 0.1 seconds (10 Hz)
+    ahrs_update_interval = 1.0 / TARGET_LOOP_RATE
+    
     last_log_time = time.time()
+
+
+    current_quaternion = [1.0, 0.0, 0.0, 0.0] # w, x, y, z
+    current_fused_yaw_deg = 0.0
+
 
     try:
         while True:
-            current_time = time.time()
+            loop_start_time = time.monotonic()
             
-            # Read from Redis streams non-blockingly or with short block
-            read_redis_streams() # This updates latest_control_commands and latest_ips_data
+            # Đọc Redis streams (non-blocking hoặc block ngắn)
+            read_redis_streams() # Cập nhật latest_control_commands và latest_ips_data
 
-            if current_time - last_log_time >= log_interval:
-                imu_data = get_imu_data()
+            # Cập nhật AHRS với tần suất TARGET_LOOP_RATE
+            if loop_start_time - last_ahrs_update_time >= ahrs_update_interval:
+                dt_ahrs = loop_start_time - last_ahrs_update_time # Tính dt thực tế
+                last_ahrs_update_time = loop_start_time # Cập nhật thời điểm cuối
+                
+                imu_data_raw = get_imu_data()
+
+                gyro_rad_s = [
+                    math.radians(imu_data_raw.get('gyro_x', 0.0)),
+                    math.radians(imu_data_raw.get('gyro_y', 0.0)),
+                    math.radians(imu_data_raw.get('gyro_z', 0.0))
+                ]
+                accel_g = [
+                    imu_data_raw.get('accel_x', 0.0),
+                    imu_data_raw.get('accel_y', 0.0),
+                    imu_data_raw.get('accel_z', 1.0)
+                ]
+                mag_uT = [
+                    imu_data_raw.get('mag_x', 0.1),
+                    imu_data_raw.get('mag_y', 0.0),
+                    imu_data_raw.get('mag_z', 0.0)
+                ]
+                try:
+                    # Chuyển đổi Python lists thành NumPy arrays
+                    q_input_np = np.array(current_quaternion)
+                    gyro_np = np.array(gyro_rad_s)
+                    accel_np = np.array(accel_g)
+                    mag_np = np.array(mag_uT)
+
+                    # Gọi updateMARG với NumPy arrays
+                    # (Kiểm tra lại tên tham số cho quaternion cũ, ví dụ q_old, q, Q)
+                    # new_q_np = ahrs_filter.updateMARG(q=q_input_np, gyr=gyro_np, acc=accel_np, mag=mag_np)
+                    # Hoặc nếu không cần dt và q_old là tham số đầu tiên:
+                    # new_q_np = ahrs_filter.updateMARG(q_input_np, gyr=gyro_np, acc=accel_np, mag=mag_np)
+                    # Hoặc nếu cần dt:
+                    new_q_np = ahrs_filter.updateMARG(q_input_np, gyr=gyro_np, acc=accel_np, mag=mag_np)
 
 
+                    if new_q_np is not None and len(new_q_np) == 4:
+                        current_quaternion = new_q_np.tolist() # Chuyển lại thành list nếu cần lưu trữ hoặc các hàm khác mong đợi list
+                    else:
+                        # Nếu hàm không trả về hoặc trả về sai, thử lấy từ thuộc tính .Q
+                        if hasattr(ahrs_filter, 'Q') and isinstance(ahrs_filter.Q, np.ndarray) and len(ahrs_filter.Q) == 4:
+                            current_quaternion = ahrs_filter.Q.tolist()
+                        elif hasattr(ahrs_filter, 'Q') and isinstance(ahrs_filter.Q, list) and len(ahrs_filter.Q) == 4:
+                            current_quaternion = ahrs_filter.Q
+                        # else: print("Teach: Failed to get updated quaternion from Madgwick.")
 
-                print(f"--- IMU Data at {current_time:.2f} ---")
-                print(f"  Accel (X,Y,Z): ({imu_data.get('accel_x', 0):.2f}, {imu_data.get('accel_y', 0):.2f}, {imu_data.get('accel_z', 0):.2f}) g")
-                print(f"  Gyro (X,Y,Z):  ({imu_data.get('gyro_x', 0):.2f}, {imu_data.get('gyro_y', 0):.2f}, {imu_data.get('gyro_z', 0):.2f}) deg/s")
-                print(f"  Mag (X,Y,Z):   ({imu_data.get('mag_x', 0):.2f}, {imu_data.get('mag_y', 0):.2f}, {imu_data.get('mag_z', 0):.2f}) uT") # Đơn vị có thể khác tùy scale factor
-                print(f"  Temp MPU:      {imu_data.get('temperature_mpu', 0):.2f} C")
-                print(f"  Temp BMP:      {imu_data.get('temperature_bmp', 0):.2f} C")
-                print(f"  Pressure:      {imu_data.get('pressure', 0):.0f} Pa")
-                print(f"  Altitude BMP:  {imu_data.get('altitude_bmp', 0):.2f} m")
-                print(f"  Control CMDs:  {latest_control_commands}")
-                if USE_IPS_FLAG:
-                   print(f"  IPS Data:      {latest_ips_data}")
-                print("-------------------------")
-
-
-
-
-                recorder.record_frame(imu_data, latest_control_commands, latest_ips_data)
-                # print(f"Logged at {current_time:.2f}") # Debug
-                last_log_time = current_time
+                except TypeError as e_te:
+                    print(f"Teach: TypeError calling updateMARG (check parameters/types or dt): {e_te}")
+                except AttributeError as e_attr: # Bắt lỗi ndim ở đây nếu vẫn còn
+                    print(f"Teach: AttributeError calling updateMARG (possibly related to NumPy array expected): {e_attr}")
+                except Exception as e_ahrs_update:
+                    print(f"Teach: Error updating AHRS with updateMARG: {e_ahrs_update}")
             
-            # Adjust sleep to control overall loop rate, considering log_interval
-            # If log_interval is 0.1, sleeping for 0.01 ensures Redis is checked frequently
-            time.sleep(0.01) 
+
+
+
+                # Chuyển Quaternion sang Yaw
+                q0, q1, q2, q3 = current_quaternion[0], current_quaternion[1], current_quaternion[2], current_quaternion[3]
+                siny_cosp = 2 * (q0 * q3 + q1 * q2)
+                cosy_cosp = 1 - 2 * (q2**2 + q3**2)
+                yaw_rad = math.atan2(siny_cosp, cosy_cosp)
+                current_fused_yaw_deg = math.degrees(yaw_rad)
+                if current_fused_yaw_deg < 0:
+                    current_fused_yaw_deg += 360
+
+            # Ghi log theo log_interval
+            if loop_start_time - last_log_time >= log_interval:
+                # Lấy dữ liệu IMU thô mới nhất cho log (có thể khác chút so với cái dùng cho AHRS nếu dt nhỏ)
+                # Hoặc dùng lại imu_data_raw đã đọc cho AHRS update nếu tần suất AHRS và log gần nhau
+                imu_data_for_log = get_imu_data() # Đọc lại để có IMU gần nhất với thời điểm log
+                
+                # In dữ liệu (bao gồm cả yaw đã lọc)
+                current_time_csv_log = time.time() # Timestamp cho file CSV
+                print(f"--- Teach Log --- Ts: {current_time_csv_log:.2f} (AHRS dt: {dt_ahrs*1000:.1f}ms)")
+                print(f"  IMU Raw GyroZ: {imu_data_for_log.get('gyro_z', 0):.2f} deg/s")
+                print(f"  Fused Yaw: {current_fused_yaw_deg:.2f} degrees")
+                print(f"  Ctrl CMDs: LDir({latest_control_commands.get('motor_left_dir',0)}) LSpd({latest_control_commands.get('motor_left_speed',0)}) | "
+                      f"RDir({latest_control_commands.get('motor_right_dir',0)}) RSpd({latest_control_commands.get('motor_right_speed',0)})")
+                if USE_IPS_FLAG: print(f"  IPS Data:  {latest_ips_data}")
+                print("-" * 20)
+
+                recorder.record_frame(imu_data_for_log, latest_control_commands, latest_ips_data, current_fused_yaw_deg)
+                last_log_time = loop_start_time # Cập nhật thời điểm log cuối cùng
+            
+            # Sleep để duy trì TARGET_LOOP_RATE cho việc cập nhật AHRS thường xuyên
+            # và cũng để không chiếm hết CPU.
+            # Vòng lặp chính sẽ cố gắng chạy ở TARGET_LOOP_RATE.
+            # Việc ghi log sẽ xảy ra thưa hơn nếu log_interval > ahrs_update_interval.
+            time_to_sleep_loop = ahrs_update_interval - (time.monotonic() - loop_start_time)
+            if time_to_sleep_loop > 0:
+                time.sleep(time_to_sleep_loop)
+            # else: # Vòng lặp bị chậm hơn ahrs_update_interval
+                # print(f"Teach: Loop slower than AHRS update interval. Actual dt: {dt_ahrs*1000:.1f}ms")
 
     except KeyboardInterrupt:
         print("\n[INFO] Teach phase stopped by user.")
@@ -486,14 +581,14 @@ def main_teach_phase():
         if 'recorder' in locals() and recorder:
             recorder.close()
         if redis_client:
-            # Optional: Remove consumer from group if desired, or just close connection
-            # try:
-            #     if redis_client.exists(CONTROL_STREAM_NAME):
-            #        redis_client.xgroup_delconsumer(CONTROL_STREAM_NAME, TEACH_CONSUMER_GROUP_CONTROL, TEACH_CONSUMER_NAME)
-            #     if USE_IPS_FLAG and redis_client.exists(IPS_STREAM_NAME):
-            #        redis_client.xgroup_delconsumer(IPS_STREAM_NAME, TEACH_CONSUMER_GROUP_IPS, TEACH_CONSUMER_NAME)
-            # except Exception as e_del_consumer:
-            #     print(f"Teach: Error deleting consumer from group: {e_del_consumer}")
+            
+            try:
+                if redis_client.exists(CONTROL_STREAM_NAME):
+                   redis_client.xgroup_delconsumer(CONTROL_STREAM_NAME, TEACH_CONSUMER_GROUP_CONTROL, TEACH_CONSUMER_NAME)
+                if USE_IPS_FLAG and redis_client.exists(IPS_STREAM_NAME):
+                   redis_client.xgroup_delconsumer(IPS_STREAM_NAME, TEACH_CONSUMER_GROUP_IPS, TEACH_CONSUMER_NAME)
+            except Exception as e_del_consumer:
+                print(f"Teach: Error deleting consumer from group: {e_del_consumer}")
             redis_client.close() # Close the connection
             print("Teach: Redis connection closed.")
         print("[INFO] Teach phase cleanup complete.")
@@ -506,5 +601,5 @@ if __name__ == "__main__":
     else:
         USE_IPS_FLAG = False # Default
         print("Teach: IPS data collection DISABLED. To enable, run with --use-ips argument.")
-        
+    last_ahrs_update_time = time.monotonic()
     main_teach_phase()

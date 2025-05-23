@@ -147,22 +147,59 @@ def get_imu_data():
         UT = read_unsigned_word_big_endian(bus, BMP180_ADDR, BMP180_REG_RESULT_MSB)
         OSS = 0
         bus.write_byte_data(BMP180_ADDR, BMP180_REG_CONTROL, BMP180_CMD_READ_PRESSURE_0 + (OSS << 6))
-        time.sleep(0.005 + (0.003 * (1<<OSS)))
+        time.sleep(0.015)
         UP_msb = bus.read_byte_data(BMP180_ADDR, 0xF6)
         UP_lsb = bus.read_byte_data(BMP180_ADDR, 0xF7)
         UP_xlsb = bus.read_byte_data(BMP180_ADDR, 0xF8)
         UP = ((UP_msb << 16) + (UP_lsb << 8) + UP_xlsb) >> (8 - OSS)
-        X1 = (UT - AC6) * AC5 / (2**15); X2 = MC * (2**11) / (X1 + MD if (X1 + MD) != 0 else 1) ; B5 = X1 + X2
-        imu_payload["temperature_bmp"] = (B5 + 8) / (2**4) / 10.0
-        B6 = B5 - 4000; X1 = (B2 * (B6 * B6 / (2**12))) / (2**11); X2 = AC2 * B6 / (2**11); X3 = X1 + X2
-        B3 = (((AC1 * 4 + X3) << OSS) + 2) / 4
-        X1 = AC3 * B6 / (2**13); X2 = (B1 * (B6 * B6 / (2**12))) / (2**16); X3 = ((X1 + X2) + 2) / (2**2)
-        B4 = AC4 * (X3 + 32768) / (2**15); B7 = (UP - B3) * (50000 >> OSS)
-        p = (B7 * 2) / B4 if B4 != 0 and B7 >= 0x80000000 else (B7 / B4) * 2 if B4 != 0 else 0
-        X1 = (p / (2**8))**2; X1 = (X1 * 3038) / (2**16); X2 = (-7357 * p) / (2**16)
-        imu_payload["pressure"] = p + (X1 + X2 + 3791) / (2**4)
-        imu_payload["altitude_bmp"] = 44330 * (1.0 - pow(imu_payload["pressure"] / 101325.0, 1/5.255)) if imu_payload["pressure"] > 0 else 0
-    except Exception as e: pass # print(f"Teach: Error reading BMP180: {e}")
+
+        # Đảm bảo các giá trị hiệu chuẩn không bằng không trước khi chia
+        # Sử dụng // cho phép chia nguyên
+        if AC5 == 0 or (X1_temp := (UT - AC6) * AC5 // (2**15)) + MD == 0:
+            imu_payload["temperature_bmp"], imu_payload["pressure"], imu_payload["altitude_bmp"] = 0, 0, 0
+        else:
+            X1 = X1_temp
+            # Sử dụng // cho phép chia nguyên
+            X2 = MC * (2**11) // (X1 + MD)
+            B5 = X1 + X2
+            # Nhiệt độ có thể giữ dạng float
+            imu_payload["temperature_bmp"] = (B5 + 8) / (2**4) / 10.0
+            B6 = B5 - 4000
+            # Sử dụng // cho phép chia nguyên
+            X1 = (B2 * (B6 * B6 // (2**12))) // (2**11)
+            X2 = AC2 * B6 // (2**11)
+            X3 = X1 + X2
+            # Sử dụng // cho phép chia nguyên. X3 bây giờ là số nguyên, << sẽ hoạt động.
+            B3 = (((AC1 * 4 + X3) << OSS) + 2) // 4
+            # Sử dụng // cho phép chia nguyên
+            X1 = AC3 * B6 // (2**13)
+            X2 = (B1 * (B6 * B6 // (2**12))) // (2**16)
+            X3 = ((X1 + X2) + 2) // 4
+            B4 = AC4 * (X3 + 32768) // (2**15)
+            
+            if B4 == 0: 
+                imu_p["pressure"], imu_p["altitude_bmp"] = 0, 0
+            else:
+                B7 = (UP - B3) * (50000 >> OSS)
+                # Phép chia ở đây nên là float để có áp suất chính xác
+                p_calc = (B7 * 2) / B4 if B7 >= 0x80000000 else (B7 / B4) * 2
+                
+                # Sử dụng // cho các bước hiệu chỉnh áp suất
+                X1_p = (p_calc / (2**8))**2
+                X1_p = (X1_p * 3038) // (2**16)
+                X2_p = (-7357 * p_calc) // (2**16)
+                # Phép chia cuối cùng là float
+                imu_payload["pressure"] = p_calc + (X1_p + X2_p + 3791) / (2**4)
+                
+                if imu_payload["pressure"] > 0:
+                    imu_payload["altitude_bmp"] = 44330 * (1.0 - pow(imu_payload["pressure"] / 101325.0, 1/5.255))
+                else: 
+                    imu_payload["altitude_bmp"] = 0
+
+    except Exception as e:
+        print(f"Lỗi khi đọc BMP180: {e}")
+        # Có thể đặt giá trị mặc định ở đây nếu muốn
+        imu_p["temperature_bmp"], imu_p["pressure"], imu_p["altitude_bmp"] = 0, 0, 0
     return imu_payload
 
 # ---------- RECORDING CLASS ----------

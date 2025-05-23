@@ -198,6 +198,8 @@ def get_live_imu_data():
         # Có thể đặt giá trị mặc định ở đây nếu muốn
         imu_p["temperature_bmp"], imu_p["pressure"], imu_p["altitude_bmp"] = 0, 0, 0
 
+    return imu_p
+
 # --- Redis Publishing Function ---
 def setup_redis_publisher():
     global redis_client_publisher
@@ -315,12 +317,22 @@ def main_repeat_phase(session_to_repeat_path, use_ips_from_log_flag):
                     log_entry[key] = None # Handle empty strings as None
                 elif key in ['timestamp', 'accel_x', 'accel_y', 'accel_z', 
                              'gyro_x', 'gyro_y', 'gyro_z', 'mag_x', 'mag_y', 'mag_z',
-                             'temperature_mpu', 'temperature_bmp', 'pressure', 'altitude_bmp',
-                             'ips_x', 'ips_y', 'ips_yaw', 'ips_quality']:
-                    log_entry[key] = float(value_str)
+                             'temp_mpu', 'temp_bmp', 'pressure', 'altitude_bmp',
+                             'ips_x', 'ips_y', 'ips_yaw', 'ips_quality','fused_yaw_deg']:
+                    try:
+                        log_entry[key] = float(value_str) # Chuyển đổi giá trị chuỗi (value_str) sang kiểu số thực (float)
+                    except ValueError:
+                        print(f"Repeat: ValueError converting '{value_str}' to float for key '{key}'. Setting to None.")
+                        log_entry[key] = None # Nếu không chuyển đổi được (ví dụ value_str không phải là số), gán là None
+                
                 elif key in ['motor_left_dir', 'motor_left_speed', 'motor_right_dir', 'motor_right_speed',
                              'servo1_angle', 'servo2_angle', 'e_stop_active']:
-                    log_entry[key] = int(value_str)
+                    try:
+                        log_entry[key] = int(value_str) # Chuyển đổi giá trị chuỗi (value_str) sang kiểu số nguyên (int)
+                    except ValueError:
+                        print(f"Repeat: ValueError converting '{value_str}' to int for key '{key}'. Setting to None.")
+                        log_entry[key] = None # Nếu không chuyển đổi được, gán là None
+                
                 else:
                     log_entry[key] = value_str # Keep frame_file as string
 
@@ -336,8 +348,10 @@ def main_repeat_phase(session_to_repeat_path, use_ips_from_log_flag):
 
             # --- Target Yaw from log (IMPORTANT: How do you define this?) ---
             # Option A: If you logged an absolute fused yaw during teach:
+
             target_absolute_yaw = log_entry.get('fused_yaw_deg', None) 
             # Option B: If you want to replicate yaw rate changes:
+
             target_yaw_rate_from_log = log_entry.get('gyro_z', 0.0) # In deg/s
 
             # --- Wait to match log timing ---
@@ -352,22 +366,24 @@ def main_repeat_phase(session_to_repeat_path, use_ips_from_log_flag):
             last_ahrs_update_time = current_monotonic_time
             
             live_imu = get_live_imu_data()
-
             gyro_np = np.array([
                 math.radians(live_imu.get('gyro_x',0.0)),
                 math.radians(live_imu.get('gyro_y',0.0)),
                 math.radians(live_imu.get('gyro_z',0.0))
             ])
+
             accel_np = np.array([
                 live_imu.get('accel_x',0.0),
                 live_imu.get('accel_y',0.0),
                 live_imu.get('accel_z',1.0)
             ])
+
             mag_np = np.array([
                 live_imu.get('mag_x',0.1),
                 live_imu.get('mag_y',0.0),
                 live_imu.get('mag_z',0.0)
             ])
+
             # Cập nhật bộ lọc Madgwick
             # Dựa trên ví dụ bạn cung cấp: madgwick.updateMARG(Q[t-1], gyr=..., acc=..., mag=...)
             try:

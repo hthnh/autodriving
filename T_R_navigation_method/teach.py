@@ -455,14 +455,13 @@ def main_teach_phase():
     setup_imu()
     last_ahrs_update_time = time.monotonic()
     recorder = DataRecorder(save_path_base=SAVE_DIR_BASE, use_ips_flag=USE_IPS_FLAG)
-    
 
 
     print("[INFO] Teach phase started. Press Ctrl+C to stop.")
     log_interval = 0.1 # Log data every 0.1 seconds (10 Hz)
     ahrs_update_interval = 1.0 / TARGET_LOOP_RATE
     
-    last_log_time = time.time()
+    last_log_time = time.monotonic()
 
 
     current_quaternion = [1.0, 0.0, 0.0, 0.0] # w, x, y, z
@@ -545,6 +544,7 @@ def main_teach_phase():
 
             # Ghi log theo log_interval
             if loop_start_time - last_log_time >= log_interval:
+            # if 1:
                 # Lấy dữ liệu IMU thô mới nhất cho log (có thể khác chút so với cái dùng cho AHRS nếu dt nhỏ)
                 # Hoặc dùng lại imu_data_raw đã đọc cho AHRS update nếu tần suất AHRS và log gần nhau
                 imu_data_for_log = get_imu_data() # Đọc lại để có IMU gần nhất với thời điểm log

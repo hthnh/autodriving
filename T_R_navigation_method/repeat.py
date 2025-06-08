@@ -52,10 +52,10 @@ SAMPLE_RATE = 50.0  # Hz (Tần suất bạn lấy mẫu IMU và gọi update)
 SAMPLE_PERIOD = 1.0 / SAMPLE_RATE
 try:
     # Thử khởi tạo với sample_period nếu thư viện hỗ trợ
-    ahrs_filter = Madgwick(sample_period=SAMPLE_PERIOD, beta=0.1)
+    ahrs_filter = Madgwick(sample_period=SAMPLE_PERIOD, beta=0.5)
 except TypeError:
     # Nếu không, khởi tạo không có sample_period và sẽ truyền dt vào update
-    ahrs_filter = Madgwick(beta=0.1) # Hoặc Madgwick(gain=0.1) tùy thư viện
+    ahrs_filter = Madgwick(beta=0.5) # Hoặc Madgwick(gain=0.1) tùy thư viện
 
 last_ahrs_update_time = 0.0
 current_quaternion_ahrs = np.array([1.0, 0.0, 0.0, 0.0]) # w, x, y, z - DẠNG NUMPY ARRAY
@@ -280,7 +280,7 @@ def main_repeat_phase(session_to_repeat_path, use_ips_from_log_flag):
     if not setup_imu_for_repeat(): return # Initializes IMU and last_ahrs_update_time
 
     # Initialize PID for Yaw correction (Tune Kp, Ki, Kd carefully!)
-    yaw_pid = SimplePID(Kp=1.5, Ki=0.05, Kd=0.25, output_limits=(-100, 100), anti_windup_limit=50)
+    yaw_pid = SimplePID(Kp=1.255, Ki=0.2, Kd=0.3, output_limits=(-127, 127 ), anti_windup_limit=50)
 
     print(f"Repeat: Starting Repeat phase for session: {session_to_repeat_path}")
     
@@ -476,7 +476,7 @@ def main_repeat_phase(session_to_repeat_path, use_ips_from_log_flag):
 
             if (i + 1) % 10 == 0:
                 print(f"Repeat [{i+1}/{len(recorded_data)}]: TargetYaw={yaw_pid.setpoint:.1f}, LiveYaw={live_fused_yaw_deg:.1f}, Corr={yaw_correction:.1f} | "
-                      f"LSpd={final_m_left_speed}, RSpd={final_m_right_speed}")
+                      f"LSpd={final_m_left_speed}, LD={final_m_left_dir}, RSpd={final_m_right_speed},RD={final_m_right_dir}")
 
         except KeyboardInterrupt:
             print("\nRepeat: Phase interrupted by user.")

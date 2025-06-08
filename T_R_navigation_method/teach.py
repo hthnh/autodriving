@@ -35,10 +35,10 @@ try:
     # Ví dụ, nếu thư viện dùng 'frequency':
     # ahrs_filter = Madgwick(frequency=TARGET_LOOP_RATE, beta=0.1)
     # Hoặc nếu dùng 'sample_period':
-    ahrs_filter = Madgwick(sample_period=SAMPLE_PERIOD, beta=0.1)
+    ahrs_filter = Madgwick(sample_period=SAMPLE_PERIOD, beta=1.5)
 except TypeError:
     # Nếu cách trên không đúng, thử cách khởi tạo cơ bản hơn và truyền dt vào update
-    ahrs_filter = Madgwick(beta=0.1) # beta là gain của bộ lọc
+    ahrs_filter = Madgwick(beta=1.5) # beta là gain của bộ lọc
     print("Teach: MadgwickAHRS initialized without sample_period, will pass dt to update.")
 
 

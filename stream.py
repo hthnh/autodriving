@@ -3,13 +3,13 @@ import struct
 import pickle
 import cv2
 from picamera2 import Picamera2
-cam_inx = 1
+cam_inx = 0
 # Initialize Picamera2
 picam2 = Picamera2(camera_num=cam_inx)
-# picam2.preview_configuration.main.size = (640, 480)
+picam2.preview_configuration.main.size = (640, 480)
 picam2.preview_configuration.main.format = "RGB888"
 picam2.preview_configuration.controls.FrameRate = 30
-picam2.configure("video")
+picam2.configure("preview")
 picam2.start()
 
 # Set up socket

@@ -1,7 +1,7 @@
 # nrf_receiver.py
 # Reads data from NRF24L01 and publishes it to a Redis Stream.
 
-from RF24 import RF24, RF24_PA_MAX, RF24_250KBPS  # RF24_250KBPS might be needed based on your sender
+from RF24 import RF24, RF24_PA_LOW, RF24_250KBPS  # RF24_250KBPS might be needed based on your sender
 import struct
 import time
 import redis
@@ -35,12 +35,16 @@ RAW_NRF_STREAM_NAME = 'nrf:raw_data' # Stream to publish raw NRF data
 
 def setup_radio():
     """Initializes and configures the NRF24L01 module."""
+
+    
+
     if not radio.begin():
         raise RuntimeError("NRF24L01 hardware is not responding. Check wiring and CE/CSN pins.")
-    
+    time.sleep(0.5)
+    radio.powerUp()
     # Set NRF24L01 parameters (must match sender)
-    radio.setChannel(115)             # Example channel
-    radio.setPALevel(RF24_PA_MAX)     # Power Amplifier level
+    radio.setChannel(60)             # Example channel
+    radio.setPALevel(RF24_PA_LOW)     # Power Amplifier level
     radio.setDataRate(RF24_250KBPS) # Example data rate, use RF24_1MBPS or RF24_2MBPS if sender uses that
 
     radio.openReadingPipe(1, PIPE_ADDRESS) # Open pipe 1 for listening

@@ -33,7 +33,7 @@ try:
     # Ví dụ, nếu thư viện dùng 'frequency':
     # ahrs_filter = Madgwick(frequency=TARGET_LOOP_RATE, beta=0.1)
     # Hoặc nếu dùng 'sample_period':
-    ahrs_filter = Madgwick(sample_period=SAMPLE_PERIOD, beta=5)
+    ahrs_filter = Madgwick(sample_period=SAMPLE_PERIOD, beta=0.1)
 except TypeError:
     # Nếu cách trên không đúng, thử cách khởi tạo cơ bản hơn và truyền dt vào update
     print("Teach: MadgwickAHRS initialized without sample_period, will pass dt to update.")
@@ -102,12 +102,12 @@ BMP180_CMD_READ_PRESSURE_0 = 0x34
 
 AC1, AC2, AC3, B1, B2, MB, MC, MD = 0,0,0,0,0,0,0,0
 AC4, AC5, AC6 = 0,0,0
-initial_yaw_offset_deg = None
+initial_yaw_offset_deg = 0
 
 
 
 
-def load_calibration_params(filename="calibrate_imu/imu_calibration_params.json"):
+def load_calibration_params(filename="/home/hthnh2/Desktop/autodriving/calibrate_imu/imu_calibration_params.json"):
     try:
         with open(filename, 'r') as f:
             return json.load(f)
@@ -310,8 +310,42 @@ def offset():
     global initial_yaw_offset_deg
     x = get_imu_data()
     initial_yaw_offset_deg = x['heading']
-    
-offset()
+# offset()
+
+
+
+
+def calculate_initial_euler_angles(accel_x, accel_y, accel_z, mag_x, mag_y, mag_z):
+    pitch = atan2(-accel_x, sqrt(accel_y**2 + accel_z**2))
+    roll = atan2(accel_y, accel_z)
+    yaw = math.radians(calculate_tilt_compensated_heading(accel_x, accel_y, accel_z, mag_x, mag_y, mag_z))
+    return roll, pitch, yaw
+
+
+def euler_to_quaternion(roll, pitch, yaw):
+    cr = math.cos(roll / 2)
+    sr = math.sin(roll / 2)
+    cp = math.cos(pitch / 2)
+    sp = math.sin(pitch / 2)
+    cy = math.cos(yaw / 2)
+    sy = math.sin(yaw / 2)
+
+    qw = cr * cp * cy + sr * sp * sy
+    qx = sr * cp * cy - cr * sp * sy
+    qy = cr * sp * cy + sr * cp * sy
+    qz = cr * cp * sy - sr * sp * cy
+
+    return [qw, qx, qy, qz]
+
+def quaternion():
+    imu = get_imu_data()
+    roll, pitch, yaw = calculate_initial_euler_angles(
+        imu['accel_x'], imu['accel_y'], imu['accel_z'],
+        imu['mag_x'], imu['mag_y'], imu['mag_z']
+    )
+    current_quaternion = euler_to_quaternion(roll, pitch, yaw)
+    return current_quaternion
+current_quaternion = quaternion()
 
 
 # ---------- RECORDING CLASS ----------
@@ -534,7 +568,7 @@ def main_teach_phase():
     last_log_time = time.monotonic()
 
 
-    current_quaternion = [1.0, 0.0, 0.0, 0.0] # w, x, y, z
+    global current_quaternion
     current_fused_yaw_deg = 0.0
 
 
@@ -574,14 +608,9 @@ def main_teach_phase():
                     accel_np = np.array(accel_g)
                     mag_np = np.array(mag_uT)
 
-                    # Gọi updateMARG với NumPy arrays
-                    # (Kiểm tra lại tên tham số cho quaternion cũ, ví dụ q_old, q, Q)
-                    # new_q_np = ahrs_filter.updateMARG(q=q_input_np, gyr=gyro_np, acc=accel_np, mag=mag_np)
-                    # Hoặc nếu không cần dt và q_old là tham số đầu tiên:
-                    # new_q_np = ahrs_filter.updateMARG(q_input_np, gyr=gyro_np, acc=accel_np, mag=mag_np)
-                    # Hoặc nếu cần dt:
+                    
                     new_q_np = ahrs_filter.updateMARG(q_input_np, gyr=gyro_np, acc=accel_np, mag=mag_np)
-
+                    
 
                     if new_q_np is not None and len(new_q_np) == 4:
                         current_quaternion = new_q_np.tolist() # Chuyển lại thành list nếu cần lưu trữ hoặc các hàm khác mong đợi list
@@ -591,11 +620,11 @@ def main_teach_phase():
                             current_quaternion = ahrs_filter.Q.tolist()
                         elif hasattr(ahrs_filter, 'Q') and isinstance(ahrs_filter.Q, list) and len(ahrs_filter.Q) == 4:
                             current_quaternion = ahrs_filter.Q
-                        # else: print("Teach: Failed to get updated quaternion from Madgwick.")
+                        else: print("Teach: Failed to get updated quaternion from Madgwick.")
 
                 except TypeError as e_te:
                     print(f"Teach: TypeError calling updateMARG (check parameters/types or dt): {e_te}")
-                except AttributeError as e_attr: # Bắt lỗi ndim ở đây nếu vẫn còn
+                except AttributeError as e_attr: 
                     print(f"Teach: AttributeError calling updateMARG (possibly related to NumPy array expected): {e_attr}")
                 except Exception as e_ahrs_update:
                     print(f"Teach: Error updating AHRS with updateMARG: {e_ahrs_update}")
@@ -611,9 +640,6 @@ def main_teach_phase():
                 raw_yaw_deg = math.degrees(yaw_rad)
                 if raw_yaw_deg < 0:
                     raw_yaw_deg += 360.0
-
-                # --- THÊM PHẦN NÀY ---
-                
                 # Trừ đi offset để gán yaw = 0 tại thời điểm khởi động
                 current_fused_yaw_deg = raw_yaw_deg - initial_yaw_offset_deg
                 if current_fused_yaw_deg < 0:
@@ -644,7 +670,6 @@ def main_teach_phase():
                       f"RDir({latest_control_commands.get('motor_right_dir',0)}) RSpd({latest_control_commands.get('motor_right_speed',0)})")
                 if USE_IPS_FLAG: print(f"  IPS Data:  {latest_ips_data}")
                 print("-" * 20)
-
                 recorder.record_frame(imu_data_for_log, latest_control_commands, latest_ips_data, current_fused_yaw_deg)
                 last_log_time = loop_start_time # Cập nhật thời điểm log cuối cùng
             

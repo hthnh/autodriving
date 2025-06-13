@@ -401,7 +401,6 @@ class DataRecorder:
         except Exception as e:
             print(f"Teach: Error capturing/saving frame: {e}")
             frame_filename = "error.jpg"
-
         row_data = [
             timestamp, frame_filename,
             imu_data_dict.get("accel_x", 0), imu_data_dict.get("accel_y", 0), imu_data_dict.get("accel_z", 0),
@@ -657,13 +656,16 @@ def main_teach_phase():
                 print(f"  IMU Raw GyroX: {imu_data_for_log.get('gyro_x', 0):.2f} deg/s")
                 print(f"  IMU Raw GyroY: {imu_data_for_log.get('gyro_y', 0):.2f} deg/s")
                 print(f"  IMU Raw GyroZ: {imu_data_for_log.get('gyro_z', 0):.2f} deg/s")
+                print()
                 print(f"  IMU Raw AccX: {imu_data_for_log.get('accel_x', 0):.2f} deg/s")
                 print(f"  IMU Raw AccY: {imu_data_for_log.get('accel_y', 0):.2f} deg/s")
                 print(f"  IMU Raw AccZ: {imu_data_for_log.get('accel_z', 0):.2f} deg/s")
+                print()
                 print(f"  IMU Raw MagX: {imu_data_for_log.get('mag_x', 0):.2f} deg/s")
                 print(f"  IMU Raw MagY: {imu_data_for_log.get('mag_y', 0):.2f} deg/s")
                 print(f"  IMU Raw MagZ: {imu_data_for_log.get('mag_z', 0):.2f} deg/s")
-                print(f"  IMU Heading: {imu_data_for_log.get('Heading', 0):.2f} deg/s")
+                print(f"  IMU Heading: {imu_data_for_log.get('heading', 0):.2f} deg/s")
+                print()
                 print(f"  Fused Yaw: {current_fused_yaw_deg:.2f} degrees")
                 print(f"  Ctrl CMDs: LDir({latest_control_commands.get('motor_left_dir',0)}) LSpd({latest_control_commands.get('motor_left_speed',0)}) | "
                       f"RDir({latest_control_commands.get('motor_right_dir',0)}) RSpd({latest_control_commands.get('motor_right_speed',0)})")

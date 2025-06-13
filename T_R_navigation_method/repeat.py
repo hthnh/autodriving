@@ -197,7 +197,7 @@ def get_live_imu_data():
         mag_z_raw = read_signed_word_big_endian(bus, HMC5883L_ADDR, HMC5883L_REG_DATA_X_MSB + 2)
         mag_y_raw = read_signed_word_big_endian(bus, HMC5883L_ADDR, HMC5883L_REG_DATA_X_MSB + 4)
 
-         mag = np.array([
+        mag = np.array([
             mag_x_raw - calib["hard_iron_offset_x"],
             mag_y_raw - calib["hard_iron_offset_y"],
             mag_z_raw - calib["hard_iron_offset_z"]
@@ -316,7 +316,7 @@ def euler_to_quaternion(roll, pitch, yaw):
     return [qw, qx, qy, qz]
 
 def quaternion():
-    imu = get_imu_data()
+    imu = get_live_imu_data()
     roll, pitch, yaw = calculate_initial_euler_angles(
         imu['accel_x'], imu['accel_y'], imu['accel_z'],
         imu['mag_x'], imu['mag_y'], imu['mag_z']
@@ -573,6 +573,8 @@ def main_repeat_phase(session_to_repeat_path, use_ips_from_log_flag):
             siny_cosp = 2 * (q0 * q3 + q1 * q2)
             cosy_cosp = 1 - 2 * (q2**2 + q3**2)
             yaw_rad = math.atan2(siny_cosp, cosy_cosp)
+
+
             live_fused_yaw_deg = math.degrees(yaw_rad)
             if live_fused_yaw_deg < 0: live_fused_yaw_deg += 360
             
@@ -583,7 +585,7 @@ def main_repeat_phase(session_to_repeat_path, use_ips_from_log_flag):
             # **IMPORTANT**: Decide your PID strategy here.
             # Strategy 1: Control based on absolute yaw. Requires a target_absolute_yaw from log.
             # This 'absolute_yaw_log' column needs to be created during 'teach.py' by running Madgwick there too.
-            target_absolute_yaw = float(log_entry.get('absolute_yaw_log', live_fused_yaw_deg)) # Fallback
+            target_absolute_yaw = float(log_entry.get('fused_yaw_deg', live_fused_yaw_deg)) # Fallback
             yaw_pid.set_target(target_absolute_yaw)
             yaw_correction = yaw_pid.update(live_fused_yaw_deg, dt)
 
@@ -616,7 +618,7 @@ def main_repeat_phase(session_to_repeat_path, use_ips_from_log_flag):
             )
 
             if (i + 1) % 10 == 0:
-                print(f"Repeat [{i+1}/{len(recorded_data)}]: TargetYaw={yaw_pid.setpoint:.1f}, LiveYaw={live_fused_yaw_deg:.1f}, Corr={yaw_correction:.1f} | "
+                print(f"Repeat [{i+1}/{len(recorded_data)}]: CorrYaw={yaw_pid.setpoint:.1f},TargetYaw={target_absolute_yaw:.1f}, LiveYaw={live_fused_yaw_deg:.1f}, Corr={yaw_correction:.1f} | "
                       f"LSpd={final_m_left_speed}, LD={final_m_left_dir}, RSpd={final_m_right_speed},RD={final_m_right_dir}")
 
         except KeyboardInterrupt:

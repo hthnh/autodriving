@@ -35,7 +35,7 @@ def read_signed_word_big_endian(bus_obj, addr, reg_msb):
     return val - 65536 if val >= 0x8000 else val
 
 # --- Chức năng 1: Hiệu chỉnh Gyroscope Bias ---
-def calibrate_gyro(num_samples=1000):
+def calibrate_gyro(num_samples=5000):
     print("-" * 30)
     print("Gyroscope Bias Calibration")
     print("Please keep the robot perfectly STILL for a few seconds.")
@@ -59,12 +59,15 @@ def calibrate_gyro(num_samples=1000):
     return {"gyro_bias_x": gyro_bias[0], "gyro_bias_y": gyro_bias[1], "gyro_bias_z": gyro_bias[2]}
 
 # --- Chức năng 2: Thu thập dữ liệu Magnetometer ---
-def collect_magnetometer_data(duration_seconds=30, output_file="mag_raw_data.csv"):
+def collect_magnetometer_data(duration_seconds=60, output_file="mag_raw_data.csv"):
     print("-" * 30)
     print("Magnetometer Data Collection")
     print(f"Please SLOWLY rotate the IMU/robot in all possible orientations (figure-8 motion in 3D space) for {duration_seconds} seconds.")
     print("Try to cover as many orientations as possible to get a good data cloud.")
     input("Press Enter to start data collection...")
+    for i in range(10):
+        print("wait:",i)
+        time.sleep(1)
 
     start_time = time.time()
     mag_data_points = []

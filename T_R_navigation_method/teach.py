@@ -12,15 +12,13 @@ import sys
 import math
 import numpy as np
 # import cv2 # Uncomment if you use cv2.flip and have it installed
+from math import atan2, sqrt, degrees, sin, cos
+import json
+
+
+
 
 # --- Madgwick Filter Setup ---
-# Với thư viện ahrs của Mayitzin, bạn thường cung cấp tần suất (frequency)
-# hoặc chu kỳ lấy mẫu (sample_period) khi khởi tạo.
-# Hoặc, một số hàm update của nó có thể nhận dt.
-
-# Giả sử tần suất vòng lặp chính của bạn (do log_interval kiểm soát việc ghi log,
-# nhưng vòng lặp while True có thể chạy nhanh hơn để cập nhật Madgwick)
-# là khoảng 50Hz.
 TARGET_LOOP_RATE = 50.0  # Hz, tần suất bạn muốn cập nhật AHRS
 SAMPLE_PERIOD = 1.0 / TARGET_LOOP_RATE
 
@@ -35,10 +33,9 @@ try:
     # Ví dụ, nếu thư viện dùng 'frequency':
     # ahrs_filter = Madgwick(frequency=TARGET_LOOP_RATE, beta=0.1)
     # Hoặc nếu dùng 'sample_period':
-    ahrs_filter = Madgwick(sample_period=SAMPLE_PERIOD, beta=1.5)
+    ahrs_filter = Madgwick(sample_period=SAMPLE_PERIOD, beta=5)
 except TypeError:
     # Nếu cách trên không đúng, thử cách khởi tạo cơ bản hơn và truyền dt vào update
-    ahrs_filter = Madgwick(beta=1.5) # beta là gain của bộ lọc
     print("Teach: MadgwickAHRS initialized without sample_period, will pass dt to update.")
 
 
@@ -105,6 +102,56 @@ BMP180_CMD_READ_PRESSURE_0 = 0x34
 
 AC1, AC2, AC3, B1, B2, MB, MC, MD = 0,0,0,0,0,0,0,0
 AC4, AC5, AC6 = 0,0,0
+initial_yaw_offset_deg = None
+
+
+
+
+def load_calibration_params(filename="calibrate_imu/imu_calibration_params.json"):
+    try:
+        with open(filename, 'r') as f:
+            return json.load(f)
+    except:
+        print("Warning: IMU calibration file not found or unreadable.")
+        return {
+            "gyro_bias_x": 0.0, "gyro_bias_y": 0.0, "gyro_bias_z": 0.0,
+            "hard_iron_offset_x": 0.0, "hard_iron_offset_y": 0.0, "hard_iron_offset_z": 0.0,
+            "soft_iron_matrix": np.identity(3).tolist()
+        }
+
+calib = load_calibration_params()
+
+
+
+def calculate_tilt_compensated_heading(accel_x, accel_y, accel_z, mag_x, mag_y, mag_z):
+    # Step 1: Tính pitch và roll
+    pitch = atan2(-accel_x, sqrt(accel_y**2 + accel_z**2))
+    roll = atan2(accel_y, accel_z)
+
+    # Step 2: Bù nghiêng từ trường
+    mag_x_comp = mag_x * cos(pitch) + mag_z * sin(pitch)
+    mag_y_comp = (
+        mag_x * sin(roll) * sin(pitch)
+        + mag_y * cos(roll)
+        - mag_z * sin(roll) * cos(pitch)
+    )
+
+    # Step 3: Tính hướng
+    heading = atan2(-mag_y_comp, mag_x_comp)
+
+    # Step 4: Chuyển sang độ
+    heading_deg = degrees(heading)
+    if heading_deg < 0:
+        heading_deg += 360
+
+    return heading_deg
+
+
+
+
+
+
+
 
 def read_signed_word(bus_obj, addr, reg):
     high = bus_obj.read_byte_data(addr, reg)
@@ -155,10 +202,7 @@ def setup_imu():
     print("Teach: IMU setup complete.")
 
 def get_imu_data():
-    # This function should be identical to the one you finalized for teach.py
-    # that reads MPU6050, HMC5883L, and BMP180.
-    # For brevity, I'll use a placeholder structure.
-    # MAKE SURE TO COPY YOUR FULL WORKING get_imu_data() HERE.
+
     imu_payload = {
         "accel_x": 0, "accel_y": 0, "accel_z": 0,
         "gyro_x": 0, "gyro_y": 0, "gyro_z": 0,
@@ -169,9 +213,9 @@ def get_imu_data():
         imu_payload["accel_x"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H) / 16384.0
         imu_payload["accel_y"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H + 2) / 16384.0
         imu_payload["accel_z"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H + 4) / 16384.0
-        imu_payload["gyro_x"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H) / 131.0
-        imu_payload["gyro_y"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H + 2) / 131.0
-        imu_payload["gyro_z"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H + 4) / 131.0
+        imu_payload["gyro_x"] = (read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H) / 131.0) - calib["gyro_bias_x"]
+        imu_payload["gyro_y"] = (read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H + 2) / 131.0) - calib["gyro_bias_y"]
+        imu_payload["gyro_z"] = (read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H + 4) / 131.0) - calib["gyro_bias_z"]
         temp_raw_mpu = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_TEMP_OUT_H)
         imu_payload["temperature_mpu"] = temp_raw_mpu / 340.0 + 36.53
     except Exception as e: pass # print(f"Teach: Error reading MPU6050: {e}")
@@ -180,7 +224,21 @@ def get_imu_data():
         mag_x_raw = read_signed_word_big_endian(bus, HMC5883L_ADDR, HMC5883L_REG_DATA_X_MSB)
         mag_z_raw = read_signed_word_big_endian(bus, HMC5883L_ADDR, HMC5883L_REG_DATA_X_MSB + 2) # Z is usually next
         mag_y_raw = read_signed_word_big_endian(bus, HMC5883L_ADDR, HMC5883L_REG_DATA_X_MSB + 4) # Then Y
-        imu_payload["mag_x"], imu_payload["mag_y"], imu_payload["mag_z"] = mag_x_raw * 0.92, mag_y_raw * 0.92, mag_z_raw * 0.92
+
+
+
+        mag = np.array([
+            mag_x_raw - calib["hard_iron_offset_x"],
+            mag_y_raw - calib["hard_iron_offset_y"],
+            mag_z_raw - calib["hard_iron_offset_z"]
+        ])
+
+        # 2. Nhân với soft-iron matrix (nếu bạn đã tính chính xác, còn không thì vẫn dùng identity matrix như mặc định)
+        soft_matrix = np.array(calib["soft_iron_matrix"])
+        mag_corrected = np.dot(soft_matrix, mag)
+
+
+        imu_payload["mag_x"], imu_payload["mag_y"], imu_payload["mag_z"] = mag_corrected[0] * 0.92, mag_corrected[1] * 0.92, mag_corrected[2] * 0.92
     except Exception as e: pass # print(f"Teach: Error reading HMC5883L: {e}")
 
     try: # BMP180
@@ -218,31 +276,43 @@ def get_imu_data():
             X2 = (B1 * (B6 * B6 // (2**12))) // (2**16)
             X3 = ((X1 + X2) + 2) // 4
             B4 = AC4 * (X3 + 32768) // (2**15)
-            
+            B7 = (UP - B3) * (50000 >> OSS)
             if B4 == 0: 
-                imu_p["pressure"], imu_p["altitude_bmp"] = 0, 0
+                imu_payload["pressure"], imu_payload["altitude_bmp"] = 0, 0
             else:
-                B7 = (UP - B3) * (50000 >> OSS)
-                # Phép chia ở đây nên là float để có áp suất chính xác
-                p_calc = (B7 * 2) / B4 if B7 >= 0x80000000 else (B7 / B4) * 2
-                
-                # Sử dụng // cho các bước hiệu chỉnh áp suất
-                X1_p = (p_calc / (2**8))**2
-                X1_p = (X1_p * 3038) // (2**16)
-                X2_p = (-7357 * p_calc) // (2**16)
-                # Phép chia cuối cùng là float
-                imu_payload["pressure"] = p_calc + (X1_p + X2_p + 3791) / (2**4)
-                
-                if imu_payload["pressure"] > 0:
-                    imu_payload["altitude_bmp"] = 44330 * (1.0 - pow(imu_payload["pressure"] / 101325.0, 1/5.255))
-                else: 
-                    imu_payload["altitude_bmp"] = 0
+                if B7 < 0x80000000:
+                    pressure = (B7 * 2) // B4
+                else:
+                    pressure = (B7 // B4) * 2
+
+                X1 = (pressure // 256) ** 2
+                X1 = (X1 * 3038) // (2**16)
+                X2 = (-7357 * pressure) // (2**16)
+                pressure = pressure + ((X1 + X2 + 3791) // 16)
+                imu_payload["pressure"] = pressure
+                imu_payload["altitude_bmp"] = 44330.0 * (1.0 - (pressure / 101325.0) ** (1.0 / 5.255))
 
     except Exception as e:
         print(f"Lỗi khi đọc BMP180: {e}")
         # Có thể đặt giá trị mặc định ở đây nếu muốn
-        imu_p["temperature_bmp"], imu_p["pressure"], imu_p["altitude_bmp"] = 0, 0, 0
+        imu_payload["temperature_bmp"], imu_payload["pressure"], imu_payload["altitude_bmp"] = 0, 0, 0
+
+
+    imu_payload["heading"] = calculate_tilt_compensated_heading(imu_payload["accel_x"], imu_payload["accel_y"], imu_payload["accel_z"], imu_payload["mag_x"], imu_payload["mag_y"], imu_payload["mag_z"])
+    
     return imu_payload
+
+
+
+
+
+def offset():
+    global initial_yaw_offset_deg
+    x = get_imu_data()
+    initial_yaw_offset_deg = x['heading']
+    
+offset()
+
 
 # ---------- RECORDING CLASS ----------
 class DataRecorder:
@@ -532,15 +602,22 @@ def main_teach_phase():
             
 
 
-
-                # Chuyển Quaternion sang Yaw
+                global initial_yaw_offset_deg
+                # Tính yaw từ quaternion
                 q0, q1, q2, q3 = current_quaternion[0], current_quaternion[1], current_quaternion[2], current_quaternion[3]
                 siny_cosp = 2 * (q0 * q3 + q1 * q2)
                 cosy_cosp = 1 - 2 * (q2**2 + q3**2)
                 yaw_rad = math.atan2(siny_cosp, cosy_cosp)
-                current_fused_yaw_deg = math.degrees(yaw_rad)
+                raw_yaw_deg = math.degrees(yaw_rad)
+                if raw_yaw_deg < 0:
+                    raw_yaw_deg += 360.0
+
+                # --- THÊM PHẦN NÀY ---
+                
+                # Trừ đi offset để gán yaw = 0 tại thời điểm khởi động
+                current_fused_yaw_deg = raw_yaw_deg - initial_yaw_offset_deg
                 if current_fused_yaw_deg < 0:
-                    current_fused_yaw_deg += 360
+                    current_fused_yaw_deg += 360.0
 
             # Ghi log theo log_interval
             if loop_start_time - last_log_time >= log_interval:
@@ -552,7 +629,16 @@ def main_teach_phase():
                 # In dữ liệu (bao gồm cả yaw đã lọc)
                 current_time_csv_log = time.time() # Timestamp cho file CSV
                 print(f"--- Teach Log --- Ts: {current_time_csv_log:.2f} (AHRS dt: {dt_ahrs*1000:.1f}ms)")
+                print(f"  IMU Raw GyroX: {imu_data_for_log.get('gyro_x', 0):.2f} deg/s")
+                print(f"  IMU Raw GyroY: {imu_data_for_log.get('gyro_y', 0):.2f} deg/s")
                 print(f"  IMU Raw GyroZ: {imu_data_for_log.get('gyro_z', 0):.2f} deg/s")
+                print(f"  IMU Raw AccX: {imu_data_for_log.get('accel_x', 0):.2f} deg/s")
+                print(f"  IMU Raw AccY: {imu_data_for_log.get('accel_y', 0):.2f} deg/s")
+                print(f"  IMU Raw AccZ: {imu_data_for_log.get('accel_z', 0):.2f} deg/s")
+                print(f"  IMU Raw MagX: {imu_data_for_log.get('mag_x', 0):.2f} deg/s")
+                print(f"  IMU Raw MagY: {imu_data_for_log.get('mag_y', 0):.2f} deg/s")
+                print(f"  IMU Raw MagZ: {imu_data_for_log.get('mag_z', 0):.2f} deg/s")
+                print(f"  IMU Heading: {imu_data_for_log.get('Heading', 0):.2f} deg/s")
                 print(f"  Fused Yaw: {current_fused_yaw_deg:.2f} degrees")
                 print(f"  Ctrl CMDs: LDir({latest_control_commands.get('motor_left_dir',0)}) LSpd({latest_control_commands.get('motor_left_speed',0)}) | "
                       f"RDir({latest_control_commands.get('motor_right_dir',0)}) RSpd({latest_control_commands.get('motor_right_speed',0)})")

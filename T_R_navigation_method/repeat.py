@@ -11,6 +11,10 @@ import math
 import numpy as np
 import sys   # For command line arguments and exit
 from ahrs.filters import Madgwick # Assuming you installed this library
+from math import atan2, sqrt, degrees, sin, cos
+import json
+
+
 
 # --- Configuration ---
 SERVO_CENTER_ANGLE = 90 # Default servo position if not specified in log
@@ -52,13 +56,70 @@ SAMPLE_RATE = 50.0  # Hz (Tần suất bạn lấy mẫu IMU và gọi update)
 SAMPLE_PERIOD = 1.0 / SAMPLE_RATE
 try:
     # Thử khởi tạo với sample_period nếu thư viện hỗ trợ
-    ahrs_filter = Madgwick(sample_period=SAMPLE_PERIOD, beta=0.5)
+    ahrs_filter = Madgwick(sample_period=SAMPLE_PERIOD, beta=0.1)
 except TypeError:
     # Nếu không, khởi tạo không có sample_period và sẽ truyền dt vào update
-    ahrs_filter = Madgwick(beta=0.5) # Hoặc Madgwick(gain=0.1) tùy thư viện
+    # ahrs_filter = Madgwick(beta=0.5) # Hoặc Madgwick(gain=0.1) tùy thư viện
+    print("Repeat: MadgwickAHRS initialized without sample_period, will pass dt to update.")
 
+
+# Biến lưu trữ quaternion hiện tại (khởi tạo với identity quaternion: w, x, y, z)
+current_quaternion = [1.0, 0.0, 0.0, 0.0]
+# Biến lưu trữ yaw đã lọc cuối cùng
+current_fused_yaw_deg = 0.0
+# Thời gian cập nhật AHRS lần cuối
 last_ahrs_update_time = 0.0
-current_quaternion_ahrs = np.array([1.0, 0.0, 0.0, 0.0]) # w, x, y, z - DẠNG NUMPY ARRAY
+
+
+
+
+
+
+def load_calibration_params(filename="/home/hthnh2/Desktop/autodriving/calibrate_imu/imu_calibration_params.json"):
+    try:
+        with open(filename, 'r') as f:
+            return json.load(f)
+    except:
+        print("Warning: IMU calibration file not found or unreadable.")
+        return {
+            "gyro_bias_x": 0.0, "gyro_bias_y": 0.0, "gyro_bias_z": 0.0,
+            "hard_iron_offset_x": 0.0, "hard_iron_offset_y": 0.0, "hard_iron_offset_z": 0.0,
+            "soft_iron_matrix": np.identity(3).tolist()
+        }
+
+calib = load_calibration_params()
+
+
+
+
+
+def calculate_tilt_compensated_heading(accel_x, accel_y, accel_z, mag_x, mag_y, mag_z):
+    # Step 1: Tính pitch và roll
+    pitch = atan2(-accel_x, sqrt(accel_y**2 + accel_z**2))
+    roll = atan2(accel_y, accel_z)
+
+    # Step 2: Bù nghiêng từ trường
+    mag_x_comp = mag_x * cos(pitch) + mag_z * sin(pitch)
+    mag_y_comp = (
+        mag_x * sin(roll) * sin(pitch)
+        + mag_y * cos(roll)
+        - mag_z * sin(roll) * cos(pitch)
+    )
+
+    # Step 3: Tính hướng
+    heading = atan2(-mag_y_comp, mag_x_comp)
+
+    # Step 4: Chuyển sang độ
+    heading_deg = degrees(heading)
+    if heading_deg < 0:
+        heading_deg += 360
+
+    return heading_deg
+
+
+
+
+
 
 
 # --- IMU Helper Functions (Your complete functions go here) ---
@@ -124,18 +185,32 @@ def get_live_imu_data():
         imu_p["accel_x"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H) / 16384.0
         imu_p["accel_y"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H + 2) / 16384.0
         imu_p["accel_z"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H + 4) / 16384.0
-        imu_p["gyro_x"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H) / 131.0
-        imu_p["gyro_y"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H + 2) / 131.0
-        imu_p["gyro_z"] = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H + 4) / 131.0
+        imu_p["gyro_x"] = (read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H) / 131.0 - calib["gyro_bias_x"])
+        imu_p["gyro_y"] = (read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H + 2) / 131.0 - calib["gyro_bias_y"])
+        imu_p["gyro_z"] = (read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H + 4) / 131.0 - calib["gyro_bias_z"])
         temp_raw_mpu = read_signed_word(bus, MPU6050_ADDR, MPU6050_REG_TEMP_OUT_H)
         imu_p["temperature_mpu"] = temp_raw_mpu / 340.0 + 36.53
     except Exception as e_mpu: print(f"Repeat IMU Read Error MPU: {e_mpu}")
 
     try: # HMC5883L
-        mag_z_raw = read_signed_word_big_endian(bus, HMC5883L_ADDR, HMC5883L_REG_DATA_X_MSB)
-        mag_y_raw = read_signed_word_big_endian(bus, HMC5883L_ADDR, HMC5883L_REG_DATA_X_MSB + 2)
-        mag_x_raw = read_signed_word_big_endian(bus, HMC5883L_ADDR, HMC5883L_REG_DATA_X_MSB + 4)
-        imu_p["mag_x"], imu_p["mag_y"], imu_p["mag_z"] = mag_x_raw * 0.92, mag_y_raw * 0.92, mag_z_raw * 0.92 # Example scale
+        mag_x_raw = read_signed_word_big_endian(bus, HMC5883L_ADDR, HMC5883L_REG_DATA_X_MSB)
+        mag_z_raw = read_signed_word_big_endian(bus, HMC5883L_ADDR, HMC5883L_REG_DATA_X_MSB + 2)
+        mag_y_raw = read_signed_word_big_endian(bus, HMC5883L_ADDR, HMC5883L_REG_DATA_X_MSB + 4)
+
+         mag = np.array([
+            mag_x_raw - calib["hard_iron_offset_x"],
+            mag_y_raw - calib["hard_iron_offset_y"],
+            mag_z_raw - calib["hard_iron_offset_z"]
+        ])
+
+        # 2. Nhân với soft-iron matrix (nếu bạn đã tính chính xác, còn không thì vẫn dùng identity matrix như mặc định)
+        soft_matrix = np.array(calib["soft_iron_matrix"])
+        mag_corrected = np.dot(soft_matrix, mag)
+
+
+
+
+        imu_p["mag_x"], imu_p["mag_y"], imu_p["mag_z"] = mag_corrected[0] * 0.92, mag_corrected[1] * 0.92, mag_corrected[2] * 0.92 # Example scale
     except Exception as e_hmc: print(f"Repeat IMU Read Error HMC: {e_hmc}")
 
     try: # BMP180
@@ -173,25 +248,22 @@ def get_live_imu_data():
             X2 = (B1 * (B6 * B6 // (2**12))) // (2**16)
             X3 = ((X1 + X2) + 2) // 4
             B4 = AC4 * (X3 + 32768) // (2**15)
-            
+            B7 = (UP - B3) * (50000 >> OSS)
             if B4 == 0: 
                 imu_p["pressure"], imu_p["altitude_bmp"] = 0, 0
             else:
-                B7 = (UP - B3) * (50000 >> OSS)
-                # Phép chia ở đây nên là float để có áp suất chính xác
-                p_calc = (B7 * 2) / B4 if B7 >= 0x80000000 else (B7 / B4) * 2
-                
-                # Sử dụng // cho các bước hiệu chỉnh áp suất
-                X1_p = (p_calc / (2**8))**2
-                X1_p = (X1_p * 3038) // (2**16)
-                X2_p = (-7357 * p_calc) // (2**16)
-                # Phép chia cuối cùng là float
-                imu_p["pressure"] = p_calc + (X1_p + X2_p + 3791) / (2**4)
-                
-                if imu_p["pressure"] > 0:
-                    imu_p["altitude_bmp"] = 44330 * (1.0 - pow(imu_p["pressure"] / 101325.0, 1/5.255))
-                else: 
-                    imu_p["altitude_bmp"] = 0
+                if B7 < 0x80000000:
+                    pressure = (B7 * 2) // B4
+                else:
+                    pressure = (B7 // B4) * 2
+
+                X1 = (pressure // 256) ** 2
+                X1 = (X1 * 3038) // (2**16)
+                X2 = (-7357 * pressure) // (2**16)
+                pressure = pressure + ((X1 + X2 + 3791) // 16)
+                imu_p["pressure"] = pressure
+                imu_p["altitude_bmp"] = 44330.0 * (1.0 - (pressure / 101325.0) ** (1.0 / 5.255))
+
 
     except Exception as e:
         print(f"Lỗi khi đọc BMP180: {e}")
@@ -199,6 +271,71 @@ def get_live_imu_data():
         imu_p["temperature_bmp"], imu_p["pressure"], imu_p["altitude_bmp"] = 0, 0, 0
 
     return imu_p
+
+
+
+
+
+
+
+
+
+
+
+
+
+def offset():
+    global initial_yaw_offset_deg
+    x = get_imu_data()
+    initial_yaw_offset_deg = x['heading']
+# offset()
+
+
+
+
+def calculate_initial_euler_angles(accel_x, accel_y, accel_z, mag_x, mag_y, mag_z):
+    pitch = atan2(-accel_x, sqrt(accel_y**2 + accel_z**2))
+    roll = atan2(accel_y, accel_z)
+    yaw = math.radians(calculate_tilt_compensated_heading(accel_x, accel_y, accel_z, mag_x, mag_y, mag_z))
+    return roll, pitch, yaw
+
+
+def euler_to_quaternion(roll, pitch, yaw):
+    cr = math.cos(roll / 2)
+    sr = math.sin(roll / 2)
+    cp = math.cos(pitch / 2)
+    sp = math.sin(pitch / 2)
+    cy = math.cos(yaw / 2)
+    sy = math.sin(yaw / 2)
+
+    qw = cr * cp * cy + sr * sp * sy
+    qx = sr * cp * cy - cr * sp * sy
+    qy = cr * sp * cy + sr * cp * sy
+    qz = cr * cp * sy - sr * sp * cy
+
+    return [qw, qx, qy, qz]
+
+def quaternion():
+    imu = get_imu_data()
+    roll, pitch, yaw = calculate_initial_euler_angles(
+        imu['accel_x'], imu['accel_y'], imu['accel_z'],
+        imu['mag_x'], imu['mag_y'], imu['mag_z']
+    )
+    current_quaternion = euler_to_quaternion(roll, pitch, yaw)
+    return current_quaternion
+current_quaternion = quaternion()
+
+
+
+
+
+
+
+
+
+
+
+
 
 # --- Redis Publishing Function ---
 def setup_redis_publisher():
@@ -268,7 +405,7 @@ class SimplePID:
 
 # --- Main Repeat Logic ---
 def main_repeat_phase(session_to_repeat_path, use_ips_from_log_flag):
-    global ahrs_filter, last_ahrs_update_time, current_quaternion_ahrs # Thêm current_quaternion_ahrs
+    global ahrs_filter, last_ahrs_update_time, current_quaternion # Thêm current_quaternion_ahrs
 
     log_file_path = os.path.join(session_to_repeat_path, "data.csv")
     if not os.path.exists(log_file_path):
@@ -398,6 +535,10 @@ def main_repeat_phase(session_to_repeat_path, use_ips_from_log_flag):
                 
                 # new_q_np = ahrs_filter.updateMARG(current_quaternion_ahrs, gyr=gyro_np, acc=accel_np, mag=mag_np, dt=dt)
                 # Hoặc nếu thư viện dùng sample_period đã set và không cần dt ở update:
+
+                current_quaternion_ahrs = np.array(current_quaternion)
+
+
                 new_q_np = ahrs_filter.updateMARG(current_quaternion_ahrs, gyr=gyro_np, acc=accel_np, mag=mag_np)
 
                 if new_q_np is not None and isinstance(new_q_np, np.ndarray) and new_q_np.shape == (4,):

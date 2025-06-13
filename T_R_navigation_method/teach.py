@@ -39,7 +39,6 @@ except TypeError:
     print("Teach: MadgwickAHRS initialized without sample_period, will pass dt to update.")
 
 
-last_ahrs_update_time = 0.0 # Sẽ được khởi tạo lại trong main_teach_phase
 
 
 # Biến lưu trữ quaternion hiện tại (khởi tạo với identity quaternion: w, x, y, z)

@@ -417,7 +417,7 @@ def main_repeat_phase(session_to_repeat_path, use_ips_from_log_flag):
     if not setup_imu_for_repeat(): return # Initializes IMU and last_ahrs_update_time
 
     # Initialize PID for Yaw correction (Tune Kp, Ki, Kd carefully!)
-    yaw_pid = SimplePID(Kp=1.255, Ki=0.2, Kd=0.3, output_limits=(-127, 127 ), anti_windup_limit=50)
+    yaw_pid = SimplePID(Kp=1.5, Ki=0.2, Kd=0.3, output_limits=(-127, 127 ), anti_windup_limit=50)
 
     print(f"Repeat: Starting Repeat phase for session: {session_to_repeat_path}")
     

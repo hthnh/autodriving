@@ -1,2 +1,4 @@
 opencv-python-headless
 numpy
+PySide6
+pyserial

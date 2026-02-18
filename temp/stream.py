@@ -3,7 +3,7 @@ import struct
 import pickle
 import cv2
 from picamera2 import Picamera2
-cam_inx = 0
+cam_inx = 1
 # Initialize Picamera2
 picam2 = Picamera2(camera_num=cam_inx)
 picam2.preview_configuration.main.size = (640, 480)

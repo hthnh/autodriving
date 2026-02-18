@@ -6,10 +6,19 @@ import math
 
 from protocol import build_packet, CMD_DRIVE, CMD_PING
 from uart_driver import UARTDriver
+from core.camera_manager import CameraManager
+
 
 # ---- lane keeping imports (NEW) ----
-from autodrive.lane_algo_state import LaneAlgoState
-from autodrive.lane_algo_geometry import LaneAlgoGeometry
+from algorithms.lane_algo_state import LaneAlgoState
+from algorithms.lane_algo_geometry import LaneAlgoGeometry
+
+
+from algorithms.follow_state import FollowState
+from algorithms.target_tracker import TargetTracker
+from algorithms.lidar_algo import LidarProcessor
+from core.behavior import follow_arbitration
+
 
 # ---------------- CONFIG ----------------
 STEER_CENTER = 90
@@ -32,6 +41,13 @@ class ControlHub:
         self.last_cmd = None
         self.last_send = 0.0
 
+        # ===== RUNTIME PARAMS (NEW) =====
+        self.runtime_params = {
+            "stop_threshold": 0.5,
+            "kp_steering": 0.004
+        }
+
+
         self.uart = UARTDriver()
 
         # quick link check
@@ -46,6 +62,49 @@ class ControlHub:
         self.lane_state = LaneAlgoState()
         self.lane_algo = None
         self.lane_algo_running = False
+        # ===== CAMERA MANAGER =====
+        self.camera_manager = CameraManager()
+
+        # Config riêng 2 cam
+        self.camera_manager.add_camera(1, {
+            "size": (640, 480),   # fisheye front
+            "fps": 30
+        })
+
+        self.camera_manager.add_camera(0, {
+            "size": (640, 480),   # down lane
+            "fps": 30
+        })
+        # ===== FOLLOW SYSTEM =====
+        self.follow_state = FollowState()
+        self.target_tracker = TargetTracker(self.follow_state)
+        self.lidar_processor = LidarProcessor(
+            front_width=60,
+            side_width=60,
+            stop_threshold=self.runtime_params["stop_threshold"]
+        )
+
+        self.follow_running = False
+
+    def init_follow_tracker(self, bbox):
+        frame = self.camera_manager.get_frame(1)  # front cam
+
+        if frame is None:
+            print("No frame for tracker init")
+            return False
+
+        self.target_tracker.init_tracker(frame, bbox)
+        print("Tracker initialized:", bbox)
+        return True
+
+
+
+
+    def start_follow(self):
+        self.follow_running = True
+
+    def stop_follow(self):
+        self.follow_running = False
 
     # ---------- AUTHORITY RULE ----------
     def can_accept(self, source: str) -> bool:
@@ -81,10 +140,13 @@ class ControlHub:
 
         if name == "geometry":
             self.lane_algo = LaneAlgoGeometry(
-                state=self.lane_state,
-                img_width=640,
-                car_center_offset_px=0
-            )
+            state=self.lane_state,
+            camera_manager=self.camera_manager,
+            cam_id=0,   # down camera
+            img_width=640,
+            car_center_offset_px=0
+        )
+
         else:
             self.lane_algo = None
 
@@ -112,14 +174,36 @@ class ControlHub:
         self.last_send = now
 
         # ====== LEVEL 1 MERGE (NEW, NHƯNG ĐÚNG CHỖ) ======
-        if self.level == 1 and self.lane_algo_running:
+        if self.lane_algo_running and not self.follow_running:
+
             # demo lane giả để test (thay bằng OpenCV sau)
             t = time.time()
 
             self.lane_algo.update()
 
             error = self.lane_state.error
-            steer = STEER_CENTER + error * STEER_GAIN_L1
+            kp = self.runtime_params.get("kp_steering", STEER_GAIN_L1)
+            steer = STEER_CENTER + error * kp * 100
+
+
+
+        if self.follow_running:
+            self.lidar_processor.stop_threshold = self.runtime_params["stop_threshold"]
+            frame = self.camera_manager.get_frame(1)
+            self.target_tracker.update(frame)
+
+            # mock lidar for now
+            scan = [(a, 2.0) for a in range(360)]
+            lidar_result = self.lidar_processor.process(scan)
+
+            steer, speed = follow_arbitration(
+                self.follow_state,
+                lidar_result,
+                self.runtime_params
+            )
+        
+
+
 
         # ====== CŨ ======
         steer = clamp(int(steer), 45, 135)
@@ -153,3 +237,18 @@ class ControlHub:
             bytes([STEER_CENTER, 0, 0, 0, 0])
         ))
         self.uart.close()
+
+
+    def get_mock_scan(self):
+        scan = []
+        for angle in range(360):
+            dist = 2.0
+
+            # obstacle trước mặt
+            if -10 < ((angle + 180) % 360 - 180) < 10:
+                dist = 0.4
+
+            scan.append((angle, dist))
+
+        return scan
+

@@ -1,0 +1,17 @@
+
+
+LIDAR PROTOCOL 
+
+scan_data: list[(angle_deg, distance_m)]
+[(0, 1.2), (1, 1.18), (2, 1.15), ...]
+
+{
+    "front_min": float,
+    "left_min": float,
+    "right_min": float,
+    "front_blocked": bool,
+    "recommended_direction": "left" | "right" | "forward" | "stop"
+}
+
+
+

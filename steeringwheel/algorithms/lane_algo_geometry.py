@@ -1,3 +1,4 @@
+#lane_algo_geometry.py
 import time
 import numpy as np
 import cv2
@@ -5,13 +6,8 @@ from picamera2 import Picamera2
 
 
 class LaneAlgoGeometry:
-    def __init__(
-        self,
-        state,
-        img_width=640,
-        img_height=480,
-        car_center_offset_px=0
-    ):
+    def __init__(self, state, camera_manager, cam_id, img_width=640, img_height=480, car_center_offset_px=0):
+
         self.state = state
 
         self.img_width = img_width
@@ -21,21 +17,15 @@ class LaneAlgoGeometry:
         self.car_center_x = self.image_center_x + car_center_offset_px
 
         self.running = False
-        self.picam2 = None
+        self.camera_manager = camera_manager
+        self.cam_id = cam_id
+
 
     # ---------- LIFECYCLE ----------
     def start(self):
         if self.running:
             return
 
-        self.picam2 = Picamera2(camera_num=0)
-        self.picam2.preview_configuration.main.size = (
-            self.img_width, self.img_height
-        )
-        self.picam2.preview_configuration.main.format = "RGB888"
-        self.picam2.preview_configuration.controls.FrameRate = 30
-        self.picam2.configure("preview")
-        self.picam2.start()
 
         self.running = True
         print("[LANE] Picamera2 started")
@@ -44,9 +34,6 @@ class LaneAlgoGeometry:
         if not self.running:
             return
 
-        self.picam2.stop()
-        self.picam2.close()
-        self.picam2 = None
 
         self.running = False
         self.state.error = 0.0
@@ -55,10 +42,13 @@ class LaneAlgoGeometry:
 
     # ---------- MAIN UPDATE ----------
     def update(self):
-        if not self.running or self.picam2 is None:
+        if not self.running:
             return
 
-        frame = self.picam2.capture_array()   # RGB888
+        frame = self.camera_manager.get_frame(self.cam_id)
+        if frame is None:
+            return
+
         h, w, _ = frame.shape
 
         # --------- GEOMETRY SIMPLE PIPELINE ---------

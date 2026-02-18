@@ -1,8 +1,12 @@
+#gui.py
 import sys
 import cv2
 import numpy as np
+import math
+import time
 
-from PyQt5.QtGui import QImage, QPixmap
+
+from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QPen
 
 from PyQt5.QtWidgets import (
     QApplication, QWidget,
@@ -11,11 +15,11 @@ from PyQt5.QtWidgets import (
     QSlider, QComboBox,
     QGroupBox, QMessageBox
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QPoint
 
 from control_hub import ControlHub
 
-from autodrive.lane_algo_state import LaneAlgoState
+from algorithms.lane_algo_state import LaneAlgoState
 
 
 # ================= EXTENDED WINDOW (DUMMY) =================
@@ -57,7 +61,7 @@ class LaneExtendWindow(QWidget):
         # ===== TIMER =====
         self.timer = QTimer()
         self.timer.timeout.connect(self.refresh_view)
-        self.timer.start(100)   # 10 FPS UI
+        self.timer.start(30)   # 10 FPS UI
 
     # ================= UPDATE =================
 
@@ -118,6 +122,112 @@ class LaneExtendWindow(QWidget):
 
 
 
+
+class LidarWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.scan_data = []
+        self.result = None
+        self.setMinimumSize(300, 300)
+
+    def update_data(self, scan_data, result):
+        self.scan_data = scan_data
+        self.result = result
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+        center_x = w // 2
+        center_y = h // 2
+        radius = min(w, h) // 2 - 20
+
+        # outer circle
+        painter.setPen(QPen(QColor(150, 150, 150), 2))
+        painter.drawEllipse(center_x - radius, center_y - radius,
+                            radius * 2, radius * 2)
+
+        # draw scan points
+        painter.setPen(QPen(QColor(0, 255, 0), 3))
+
+        for angle, dist in self.scan_data:
+            r = min(dist / 2.0, 1.0) * radius
+            rad = math.radians(angle)
+
+            x = center_x + r * math.cos(rad)
+            y = center_y - r * math.sin(rad)
+
+            painter.drawPoint(int(x), int(y))
+
+        # draw recommended direction arrow
+        if self.result:
+            painter.setPen(QPen(QColor(255, 0, 0), 4))
+            direction = self.result.get("recommended_direction", "")
+
+            if direction == "left":
+                painter.drawLine(center_x, center_y,
+                                 center_x - radius // 2, center_y)
+            elif direction == "right":
+                painter.drawLine(center_x, center_y,
+                                 center_x + radius // 2, center_y)
+            elif direction == "forward":
+                painter.drawLine(center_x, center_y,
+                                 center_x, center_y - radius // 2)
+
+
+
+class ClickableCameraLabel(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.start_point = None
+        self.end_point = None
+        self.drawing = False
+        self.callback = None
+
+    def mousePressEvent(self, event):
+        self.start_point = event.pos()
+        self.end_point = event.pos()
+        self.drawing = True
+
+    def mouseMoveEvent(self, event):
+        if self.drawing:
+            self.end_point = event.pos()
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        self.drawing = False
+        self.end_point = event.pos()
+        self.update()
+
+        if self.callback:
+            x1 = self.start_point.x()
+            y1 = self.start_point.y()
+            x2 = self.end_point.x()
+            y2 = self.end_point.y()
+
+            x = min(x1, x2)
+            y = min(y1, y2)
+            w = abs(x1 - x2)
+            h = abs(y1 - y2)
+
+            self.callback((x, y, w, h))
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+
+        if self.drawing and self.start_point and self.end_point:
+            painter = QPainter(self)
+            painter.setPen(QPen(QColor(255, 0, 0), 2))
+            rect_x = min(self.start_point.x(), self.end_point.x())
+            rect_y = min(self.start_point.y(), self.end_point.y())
+            rect_w = abs(self.start_point.x() - self.end_point.x())
+            rect_h = abs(self.start_point.y() - self.end_point.y())
+            painter.drawRect(rect_x, rect_y, rect_w, rect_h)
+
+
 # ================= MAIN GUI =================
 
 class ControlHubGUI(QWidget):
@@ -125,13 +235,18 @@ class ControlHubGUI(QWidget):
         super().__init__()
         self.hub = hub
 
-        self.mode = "manual"   # manual | auto
+        self.mode = "manual"   # manual | auto | follow
+
         self.level = None
 
         self.cur_speed = 0
         self.cur_steer = 90
 
         self.extend_window = None
+        self.gui_timer = QTimer()
+        self.gui_timer.timeout.connect(self.update_live_cameras)
+        self.gui_timer.start(30)   # 30 FPS GUI
+
 
         self.init_ui()
         self.init_timer()
@@ -141,7 +256,7 @@ class ControlHubGUI(QWidget):
 
     def init_ui(self):
         self.setWindowTitle("Autodrive Control Hub")
-        self.setFixedSize(520, 580)
+        self.setFixedSize(1000, 1200)
 
         main = QVBoxLayout()
 
@@ -149,13 +264,68 @@ class ControlHubGUI(QWidget):
         mode_box = QHBoxLayout()
         self.btn_manual = QPushButton("MANUAL")
         self.btn_auto = QPushButton("AUTO")
+        self.btn_follow = QPushButton("FOLLOW")
 
         self.btn_manual.clicked.connect(lambda: self.set_mode("manual"))
         self.btn_auto.clicked.connect(lambda: self.set_mode("auto"))
+        self.btn_follow.clicked.connect(lambda: self.set_mode("follow"))    
 
         mode_box.addWidget(self.btn_manual)
         mode_box.addWidget(self.btn_auto)
+        mode_box.addWidget(self.btn_follow)
         main.addLayout(mode_box)
+
+        # ===== CAMERA CONTROL =====
+        self.cam_group = QGroupBox("Camera Control")
+        cam_layout = QHBoxLayout()
+
+        self.btn_front_cam = QPushButton("Front Cam ON")
+        self.btn_front_cam.clicked.connect(self.toggle_front_cam)
+
+        self.btn_down_cam = QPushButton("Down Cam ON")
+        self.btn_down_cam.clicked.connect(self.toggle_down_cam)
+
+        cam_layout.addWidget(self.btn_front_cam)
+        cam_layout.addWidget(self.btn_down_cam)
+
+        self.cam_group.setLayout(cam_layout)
+        main.addWidget(self.cam_group)
+
+
+
+
+        # ===== SENSOR VIEW =====
+        sensor_layout = QHBoxLayout()
+
+        # Camera View
+
+
+        self.lbl_cam_front = ClickableCameraLabel()
+        self.lbl_cam_front.setText("FRONT CAMERA")
+        self.lbl_cam_front.callback = self.on_target_selected
+        self.lbl_cam_front.setFixedSize(320, 240)
+        self.lbl_cam_front.setStyleSheet("background: black;")
+
+
+
+
+
+        self.lbl_cam_down = QLabel("Down Camera")
+        self.lbl_cam_down.setFixedSize(320, 240)
+        self.lbl_cam_down.setStyleSheet("background: black;")
+
+        # Lidar View
+        self.lidar_widget = LidarWidget()
+
+        sensor_layout.addWidget(self.lbl_cam_front)
+        sensor_layout.addWidget(self.lbl_cam_down)
+        sensor_layout.addWidget(self.lidar_widget)
+
+        main.addLayout(sensor_layout)
+
+
+
+
 
         # ===== LEVEL =====
         level_group = QGroupBox("Autonomy Level")
@@ -219,9 +389,44 @@ class ControlHubGUI(QWidget):
         self.lane_group.setLayout(lane_layout)
         main.addWidget(self.lane_group)
 
+
+
+        # ===== PARAM PANEL =====
+        self.param_group = QGroupBox("Runtime Parameters (Debug)")
+        param_layout = QVBoxLayout()
+
+        # Stop threshold
+        self.lbl_stop = QLabel("Stop Threshold: 0.50")
+        self.slider_stop = QSlider(Qt.Horizontal)
+        self.slider_stop.setRange(10, 200)   # 0.10 – 2.00
+        self.slider_stop.setValue(50)
+        self.slider_stop.valueChanged.connect(self.on_stop_change)
+
+        param_layout.addWidget(self.lbl_stop)
+        param_layout.addWidget(self.slider_stop)
+
+        # Steering Kp
+        self.lbl_kp = QLabel("Steering Kp: 0.004")
+        self.slider_kp = QSlider(Qt.Horizontal)
+        self.slider_kp.setRange(1, 50)
+        self.slider_kp.setValue(4)
+        self.slider_kp.valueChanged.connect(self.on_kp_change)
+
+        param_layout.addWidget(self.lbl_kp)
+        param_layout.addWidget(self.slider_kp)
+
+        self.param_group.setLayout(param_layout)
+        main.addWidget(self.param_group)
+
+
+
+
         # ===== STATUS =====
         self.lbl_status = QLabel("")
         main.addWidget(self.lbl_status)
+        self.lbl_follow = QLabel("Follow: visible=False error=0.00 steer=90")
+        main.addWidget(self.lbl_follow)
+
 
         # ===== EMERGENCY STOP =====
         self.btn_emergency = QPushButton("EMERGENCY STOP")
@@ -232,6 +437,89 @@ class ControlHubGUI(QWidget):
         main.addWidget(self.btn_emergency)
 
         self.setLayout(main)
+
+
+    def on_target_selected(self, bbox):
+
+        frame = self.hub.camera_manager.get_frame(1)
+        if frame is None:
+            return
+
+        fh, fw, _ = frame.shape
+
+        lw = self.lbl_cam_front.width()
+        lh = self.lbl_cam_front.height()
+
+        scale_x = fw / lw
+        scale_y = fh / lh
+
+        x, y, w, h = bbox
+
+        scaled_bbox = (
+            int(x * scale_x),
+            int(y * scale_y),
+            int(w * scale_x),
+            int(h * scale_y)
+        )
+        scaled_bbox = tuple(int(v) for v in scaled_bbox)
+
+        ok = self.hub.init_follow_tracker(scaled_bbox)
+
+        if ok:
+            print("Tracker initialized")
+
+
+
+
+
+    def toggle_front_cam(self):
+        if self.hub.camera_manager.is_running(1):
+            self.hub.camera_manager.stop(1)
+            self.btn_front_cam.setText("Front Cam ON")
+        else:
+            self.hub.camera_manager.start(1)
+            self.btn_front_cam.setText("Front Cam OFF")
+
+    def toggle_down_cam(self):
+        if self.hub.camera_manager.is_running(0):
+            self.hub.camera_manager.stop(0)
+            self.btn_down_cam.setText("Down Cam ON")
+        else:
+            self.hub.camera_manager.start(0)
+            self.btn_down_cam.setText("Down Cam OFF")
+
+    def update_live_cameras(self):
+        # FRONT CAM (1)
+        frame_front = self.hub.camera_manager.get_frame(1)
+        if frame_front is not None:
+            self._show_frame(frame_front, self.lbl_cam_front)
+
+        # DOWN CAM (0)
+        frame_down = self.hub.camera_manager.get_frame(0)
+        if frame_down is not None:
+            self._show_frame(frame_down, self.lbl_cam_down)
+
+
+    def _show_frame(self, frame, label):
+        h, w, ch = frame.shape
+        bytes_per_line = ch * w
+
+        qimg = QImage(
+            frame.data,
+            w,
+            h,
+            bytes_per_line,
+            QImage.Format_RGB888
+        )
+
+        pix = QPixmap.fromImage(qimg).scaled(
+            label.width(),
+            label.height(),
+            Qt.KeepAspectRatio
+        )
+
+        label.setPixmap(pix)
+
 
     # ================= MODE / LEVEL =================
 
@@ -245,6 +533,11 @@ class ControlHubGUI(QWidget):
     def set_mode(self, mode):
         self.mode = mode
         self.level = None
+        if mode == "follow":
+            self.hub.start_follow()
+        else:
+            self.hub.stop_follow()
+
         self.apply_ui_rules()
 
     def set_level(self, level):
@@ -266,6 +559,8 @@ class ControlHubGUI(QWidget):
     def apply_ui_rules(self):
         is_manual = self.mode == "manual"
         is_auto = self.mode == "auto"
+        is_follow = self.mode == "follow"
+
 
         for btn in self.level_buttons.values():
             btn.setEnabled(is_auto)
@@ -291,6 +586,10 @@ class ControlHubGUI(QWidget):
                 self.slider_speed.setEnabled(True)
                 self.slider_steer.setEnabled(False)
                 self.lane_group.setVisible(True)
+        if is_follow:
+            self.slider_speed.setEnabled(True)
+            self.slider_steer.setEnabled(False)
+            self.hub.active_source = "autodrive"
 
         self.update_status()
 
@@ -343,6 +642,25 @@ class ControlHubGUI(QWidget):
                 # speed từ manual, steer do lane algo
                 self.hub.send_manual(self.cur_steer, self.cur_speed)
 
+        elif self.mode == "follow":
+            # tạm thời giữ speed manual
+            self.hub.send_manual(self.cur_steer, self.cur_speed)
+        
+
+        self.update_lidar_view()
+        self.update_follow_debug()
+
+    def update_follow_debug(self):
+        fs = self.hub.follow_state
+
+        self.lbl_follow.setText(
+            f"Follow: visible={fs.target_visible} "
+            f"error={fs.target_error:.3f} "
+            f"steer={fs.final_steer}"
+        )
+
+
+
     # ================= STATUS =================
 
     def update_status(self):
@@ -354,6 +672,64 @@ class ControlHubGUI(QWidget):
         txt += f" | error={self.hub.lane_state.error:.2f}"
         
         self.lbl_status.setText(txt)
+
+    def on_stop_change(self, v):
+        val = v / 100.0
+        self.lbl_stop.setText(f"Stop Threshold: {val:.2f}")
+        self.hub.runtime_params["stop_threshold"] = val
+
+    def on_kp_change(self, v):
+        val = v / 1000.0
+        self.lbl_kp.setText(f"Steering Kp: {val:.3f}")
+        self.hub.runtime_params["kp_steering"] = val
+
+
+
+
+    def update_lidar_view(self):
+        # mock lidar for now
+        scan = self.generate_mock_scan()
+        result = self.process_mock_lidar(scan)
+        self.lidar_widget.update_data(scan, result)
+
+
+    def generate_mock_scan(self):
+        scan = []
+        t = time.time()
+
+        # obstacle quay vòng
+        obstacle_center = (math.sin(t) * 90) + 180   # dao động quanh phía trước
+
+        for angle in range(360):
+            dist = 2.0
+
+            # tạo obstacle rộng 20°
+            if abs(angle - obstacle_center) < 10:
+                dist = 0.4 + 0.1 * math.sin(t * 3)
+
+            scan.append((angle, dist))
+
+        return scan
+
+
+    def process_mock_lidar(self, scan):
+        front = [d for a, d in scan if 170 < a < 190]
+        front_min = min(front) if front else 2.0
+
+        blocked = front_min < self.hub.runtime_params["stop_threshold"]
+
+        if blocked:
+            direction = "left"
+        else:
+            direction = "forward"
+
+        return {
+            "front_min": front_min,
+            "front_blocked": blocked,
+            "recommended_direction": direction
+        }
+
+
 
 
 

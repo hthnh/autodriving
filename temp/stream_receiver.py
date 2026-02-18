@@ -4,7 +4,7 @@ import pickle
 import cv2
 
 # Connect to the Raspberry Pi (replace with Pi's actual IP)
-HOST = '192.168.10.188'  # ← Change this to your Pi's IP address
+HOST = ''  # ← Change this to your Pi's IP address
 PORT = 8080             # Same port used in Pi code
 cam_inx = 1
 # Create socket

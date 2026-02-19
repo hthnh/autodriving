@@ -1,3 +1,5 @@
+#gui/mixins/lidar_mixin.py
+
 import time
 import math
 
@@ -27,7 +29,8 @@ class LidarMixin:
         front = [d for a, d in scan if 170 < a < 190]
         front_min = min(front) if front else 2.0
 
-        blocked = front_min < self.hub.runtime_params["stop_threshold"]
+        blocked = front_min < self.hub.get_runtime_param("stop_threshold")
+
 
         direction = "left" if blocked else "forward"
 

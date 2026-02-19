@@ -1,332 +1,229 @@
-
-#main_window.py
-import numpy as np
-import math
 import time
+import threading
 
+from protocol import build_packet, CMD_DRIVE, CMD_PING
+from uart_driver import UARTDriver
 
-from PyQt5.QtGui import QImage, QPixmap, QColor, QPen
-
-from PyQt5.QtWidgets import (
-    QWidget,
-    QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton,
-    QSlider, QComboBox,
-    QGroupBox, QMessageBox
-)
-from PyQt5.QtCore import Qt, QTimer
-
-from control_hub import ControlHub
+from core.camera_manager import CameraManager
 
 from algorithms.lane_algo_state import LaneAlgoState
+from algorithms.lane_algo_geometry import LaneAlgoGeometry
+from algorithms.follow_state import FollowState
+from algorithms.target_tracker import TargetTracker
+from algorithms.lidar_algo import LidarProcessor
 
-from gui.widgets.lane_extend_window import LaneExtendWindow
+from control.modes.manual_mode import ManualMode
+from control.modes.follow_mode import FollowMode
+from control.modes.autodrive.level0 import Level0Mode
+from control.modes.autodrive.level1 import Level1Mode
 
-from gui.widgets.clickable_camera import ClickableCameraLabel
 
-from gui.widgets.lidar_widget import LidarWidget
+STEER_CENTER = 90
+MAX_SPEED = 200
+SEND_PERIOD = 0.05
 
-from gui.mixins.camera_mixin import CameraMixin
-from gui.mixins.lane_mixin import LaneMixin
-from gui.mixins.status_mixin import StatusMixin
-from gui.mixins.lidar_mixin import LidarMixin
 
+def clamp(val, min_v, max_v):
+    return max(min_v, min(max_v, val))
 
-# ================= MAIN GUI =================
 
-class ControlHubGUI( QWidget, CameraMixin, LaneMixin, StatusMixin, LidarMixin):
+class ControlHub:
 
-    def __init__(self, hub: ControlHub):
-        super().__init__()
-        self.hub = hub
+    def __init__(self):
 
-        self.mode = "manual"   # manual | auto | follow
+        # ================= INPUT STATE =================
+        self.input_state = {
+            "speed": 0,
+            "steer": STEER_CENTER,
+            "mode": "manual",
+            "level": 0
+        }
 
-        self.level = None
+        self.runtime_params = {
+            "stop_threshold": 0.5,
+            "kp_steering": 0.004
+        }
 
-        self.cur_speed = 0
-        self.cur_steer = 90
+        self.emergency = False
 
-        self.extend_window = None
-        self.gui_timer = QTimer()
-        self.gui_timer.timeout.connect(self.update_live_cameras)
-        self.gui_timer.start(30)   # 30 FPS GUI
+        # ==== NEW: last command tracking ====
+        self.last_speed = 0
+        self.last_steer = STEER_CENTER
 
+        # ================= DEVICES =================
+        self.uart = UARTDriver()
+        self.uart.send(build_packet(CMD_PING))
+        time.sleep(0.1)
 
-        self.init_ui()
-        self.init_timer()
-        self.apply_ui_rules()
+        self.camera_manager = CameraManager()
+        self.camera_manager.add_camera(1, {"size": (640, 480), "fps": 30})
+        self.camera_manager.add_camera(0, {"size": (640, 480), "fps": 30})
 
-    # ================= UI =================
+        # ================= ALGORITHMS =================
+        self.lane_state = LaneAlgoState()
+        self.lane_algo = None
+        self.lane_algo_running = False
 
-    def init_ui(self):
-        self.setWindowTitle("Autodrive Control Hub")
-        self.setFixedSize(1000, 1200)
+        self.follow_state = FollowState()
+        self.target_tracker = TargetTracker(self.follow_state)
 
-        main = QVBoxLayout()
-
-        # ===== MODE =====
-        mode_box = QHBoxLayout()
-        self.btn_manual = QPushButton("MANUAL")
-        self.btn_auto = QPushButton("AUTO")
-        self.btn_follow = QPushButton("FOLLOW")
-
-        self.btn_manual.clicked.connect(lambda: self.set_mode("manual"))
-        self.btn_auto.clicked.connect(lambda: self.set_mode("auto"))
-        self.btn_follow.clicked.connect(lambda: self.set_mode("follow"))    
-
-        mode_box.addWidget(self.btn_manual)
-        mode_box.addWidget(self.btn_auto)
-        mode_box.addWidget(self.btn_follow)
-        main.addLayout(mode_box)
-
-        # ===== CAMERA CONTROL =====
-        self.cam_group = QGroupBox("Camera Control")
-        cam_layout = QHBoxLayout()
-
-        self.btn_front_cam = QPushButton("Front Cam ON")
-        self.btn_front_cam.clicked.connect(self.toggle_front_cam)
-
-        self.btn_down_cam = QPushButton("Down Cam ON")
-        self.btn_down_cam.clicked.connect(self.toggle_down_cam)
-
-        cam_layout.addWidget(self.btn_front_cam)
-        cam_layout.addWidget(self.btn_down_cam)
-
-        self.cam_group.setLayout(cam_layout)
-        main.addWidget(self.cam_group)
-
-
-
-
-        # ===== SENSOR VIEW =====
-        sensor_layout = QHBoxLayout()
-
-        # Camera View
-
-
-        self.lbl_cam_front = ClickableCameraLabel()
-        self.lbl_cam_front.setText("FRONT CAMERA")
-        self.lbl_cam_front.callback = self.on_target_selected
-        self.lbl_cam_front.setFixedSize(320, 240)
-        self.lbl_cam_front.setStyleSheet("background: black;")
-
-
-
-
-
-        self.lbl_cam_down = QLabel("Down Camera")
-        self.lbl_cam_down.setFixedSize(320, 240)
-        self.lbl_cam_down.setStyleSheet("background: black;")
-
-        # Lidar View
-        self.lidar_widget = LidarWidget()
-
-        sensor_layout.addWidget(self.lbl_cam_front)
-        sensor_layout.addWidget(self.lbl_cam_down)
-        sensor_layout.addWidget(self.lidar_widget)
-
-        main.addLayout(sensor_layout)
-
-
-
-
-
-        # ===== LEVEL =====
-        level_group = QGroupBox("Autonomy Level")
-        level_layout = QHBoxLayout()
-
-        self.level_buttons = {}
-        for i in range(6):
-            btn = QPushButton(f"L{i}")
-            btn.clicked.connect(lambda _, lv=i: self.set_level(lv))
-            self.level_buttons[i] = btn
-            level_layout.addWidget(btn)
-
-        level_group.setLayout(level_layout)
-        main.addWidget(level_group)
-
-        # ===== SPEED =====
-        self.lbl_speed = QLabel("Speed: 0")
-        self.slider_speed = QSlider(Qt.Horizontal)
-        self.slider_speed.setRange(-200, 200)
-        self.slider_speed.valueChanged.connect(self.on_speed_change)
-
-        main.addWidget(self.lbl_speed)
-        main.addWidget(self.slider_speed)
-
-        # ===== STEER =====
-        self.lbl_steer = QLabel("Steering: 90")
-        self.slider_steer = QSlider(Qt.Horizontal)
-        self.slider_steer.setRange(45, 135)
-        self.slider_steer.setValue(90)
-        self.slider_steer.valueChanged.connect(self.on_steer_change)
-
-        main.addWidget(self.lbl_steer)
-        main.addWidget(self.slider_steer)
-
-        # ===== LANE CONTAINER (L1) =====
-        self.lane_group = QGroupBox("Lane Keeping Algorithm")
-        lane_layout = QVBoxLayout()
-
-        self.combo_algo = QComboBox()
-        # map đúng với ControlHub.select_lane_algo
-        self.combo_algo.addItems(["geometry"])
-
-        algo_btns = QHBoxLayout()
-        self.btn_algo_start = QPushButton("START")
-        self.btn_algo_stop = QPushButton("STOP")
-
-        self.btn_algo_start.clicked.connect(self.start_lane_algo)
-        self.btn_algo_stop.clicked.connect(self.stop_lane_algo)
-
-        algo_btns.addWidget(self.btn_algo_start)
-        algo_btns.addWidget(self.btn_algo_stop)
-
-        self.btn_extend = QPushButton("EXTEND VIEW")
-        self.btn_extend.clicked.connect(self.open_extend_view)
-
-        lane_layout.addWidget(QLabel("Algorithm:"))
-        lane_layout.addWidget(self.combo_algo)
-        lane_layout.addLayout(algo_btns)
-        lane_layout.addWidget(self.btn_extend)
-
-        self.lane_group.setLayout(lane_layout)
-        main.addWidget(self.lane_group)
-
-
-
-        # ===== PARAM PANEL =====
-        self.param_group = QGroupBox("Runtime Parameters (Debug)")
-        param_layout = QVBoxLayout()
-
-        # Stop threshold
-        self.lbl_stop = QLabel("Stop Threshold: 0.50")
-        self.slider_stop = QSlider(Qt.Horizontal)
-        self.slider_stop.setRange(10, 200)   # 0.10 – 2.00
-        self.slider_stop.setValue(50)
-        self.slider_stop.valueChanged.connect(self.on_stop_change)
-
-        param_layout.addWidget(self.lbl_stop)
-        param_layout.addWidget(self.slider_stop)
-
-        # Steering Kp
-        self.lbl_kp = QLabel("Steering Kp: 0.004")
-        self.slider_kp = QSlider(Qt.Horizontal)
-        self.slider_kp.setRange(1, 50)
-        self.slider_kp.setValue(4)
-        self.slider_kp.valueChanged.connect(self.on_kp_change)
-
-        param_layout.addWidget(self.lbl_kp)
-        param_layout.addWidget(self.slider_kp)
-
-        self.param_group.setLayout(param_layout)
-        main.addWidget(self.param_group)
-
-
-
-
-        # ===== STATUS =====
-        self.lbl_status = QLabel("")
-        main.addWidget(self.lbl_status)
-        self.lbl_follow = QLabel("Follow: visible=False error=0.00 steer=90")
-        main.addWidget(self.lbl_follow)
-
-
-        # ===== EMERGENCY STOP =====
-        self.btn_emergency = QPushButton("EMERGENCY STOP")
-        self.btn_emergency.setStyleSheet(
-            "background-color: red; color: white; font-weight: bold; height: 40px;"
+        self.lidar_processor = LidarProcessor(
+            front_width=60,
+            side_width=60,
+            stop_threshold=self.runtime_params["stop_threshold"]
         )
-        self.btn_emergency.clicked.connect(self.emergency_stop)
-        main.addWidget(self.btn_emergency)
 
-        self.setLayout(main)
+        # ================= MODE =================
+        self.mode = ManualMode(self)
 
+        # ================= LOOP =================
+        self.running = True
+        self.thread = threading.Thread(
+            target=self._loop,
+            daemon=True
+        )
+        self.thread.start()
 
+    # =================================================
+    # ================= CONTROL API ===================
+    # =================================================
 
+    def set_input(self, speed, steer):
+        self.input_state["speed"] = speed
+        self.input_state["steer"] = steer
 
+    def set_mode(self, mode_name):
+        self.input_state["mode"] = mode_name
 
-    # ================= MODE / LEVEL =================
+        if mode_name == "manual":
+            self.mode = ManualMode(self)
+
+        elif mode_name == "follow":
+            self.mode = FollowMode(self)
+
+        elif mode_name == "auto":
+            # giữ mode, level sẽ quyết định
+            pass
+
+    def set_level(self, level):
+        self.input_state["level"] = level
+
+        if level == 0:
+            self.mode = Level0Mode(self)
+
+        elif level == 1:
+            self.mode = Level1Mode(self)
 
     def emergency_stop(self):
-        self.cur_speed = 0
-        self.cur_steer = 90
-        self.slider_speed.setValue(0)
-        self.slider_steer.setValue(90)
-        self.hub.send_manual(90, 0)
+        self.emergency = True
 
+    def clear_emergency(self):
+        self.emergency = False
 
-    # ================= INPUT =================
+    # =================================================
+    # ================= STATUS API ====================
+    # =================================================
 
-    def on_speed_change(self, v):
-        self.cur_speed = v
-        self.lbl_speed.setText(f"Speed: {v}")
+    def get_vehicle_status(self):
+        return {
+            "mode": self.input_state["mode"],
+            "level": self.input_state["level"],
+            "speed": self.last_speed,
+            "steer": self.last_steer,
+            "emergency": self.emergency
+        }
 
-    def on_steer_change(self, v):
-        self.cur_steer = v
-        self.lbl_steer.setText(f"Steering: {v}")
+    # =================================================
+    # ================= CAMERA API ====================
+    # =================================================
 
-    # ================= LANE ALGO CONTROL =================
+    def start_camera(self, cam_id):
+        self.camera_manager.start(cam_id)
 
-    def start_lane_algo(self):
-        algo = self.combo_algo.currentText()
-        ok = self.hub.select_lane_algo(algo)
-        if not ok:
-            QMessageBox.warning(self, "Warning", "Lane algorithm already running")
-            return
-        self.hub.start_lane_algo()
+    def stop_camera(self, cam_id):
+        self.camera_manager.stop(cam_id)
 
-    def stop_lane_algo(self):
-        self.hub.stop_lane_algo()
+    def is_camera_running(self, cam_id):
+        return self.camera_manager.is_running(cam_id)
 
-    # ================= EXTEND =================
+    def get_camera_frame(self, cam_id):
+        return self.camera_manager.get_frame(cam_id)
 
-    def open_extend_view(self):
-        if self.extend_window is None:
-            self.extend_window = LaneExtendWindow(self.hub)
-        self.extend_window.show()
+    # =================================================
+    # ================= FOLLOW API ====================
+    # =================================================
 
-    # ================= CONTROL LOOP =================
+    def init_follow_target(self, bbox):
+        frame = self.get_camera_frame(1)
+        if frame is None:
+            return False
+        self.target_tracker.init_tracker(frame, bbox)
+        return True
 
-    def init_timer(self):
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.control_tick)
-        self.timer.start(50)
+    def get_follow_status(self):
+        return {
+            "visible": self.follow_state.target_visible,
+            "error": self.follow_state.target_error,
+            "steer": self.follow_state.final_steer,
+            "speed": self.follow_state.final_speed
+        }
 
-    def control_tick(self):
-        if self.mode == "manual":
-            self.hub.send_manual(self.cur_steer, self.cur_speed)
+    # =================================================
+    # ================= LANE API ======================
+    # =================================================
 
-        elif self.mode == "auto":
-            if self.level == 0:
-                self.hub.send_manual(self.cur_steer, self.cur_speed)
+    def get_lane_status(self):
+        return {
+            "running": self.lane_algo_running,
+            "error": self.lane_state.error,
+            "confidence": getattr(self.lane_state, "confidence", 0.0)
+        }
 
-            elif self.level == 1:
-                # speed từ manual, steer do lane algo
-                self.hub.send_manual(self.cur_steer, self.cur_speed)
+    def get_lane_debug_frames(self):
+        return getattr(self.lane_state, "debug_frames", {})
 
-        elif self.mode == "follow":
-            # tạm thời giữ speed manual
-            self.hub.send_manual(self.cur_steer, self.cur_speed)
-        
+    # =================================================
+    # ================= LOOP ==========================
+    # =================================================
 
-        self.update_lidar_view()
-        self.update_follow_debug()
+    def _loop(self):
 
+        while self.running:
 
+            if self.emergency:
+                steer = STEER_CENTER
+                speed = 0
+            else:
+                steer, speed = self.mode.process(self.input_state)
 
+            steer = clamp(int(steer), 45, 135)
+            speed = clamp(int(speed), -MAX_SPEED, MAX_SPEED)
 
-    # ================= STATUS =================
+            # ==== NEW: store last command ====
+            self.last_steer = steer
+            self.last_speed = speed
 
-    def on_stop_change(self, v):
-        val = v / 100.0
-        self.lbl_stop.setText(f"Stop Threshold: {val:.2f}")
-        self.hub.runtime_params["stop_threshold"] = val
+            self._send_drive(steer, speed)
 
-    def on_kp_change(self, v):
-        val = v / 1000.0
-        self.lbl_kp.setText(f"Steering Kp: {val:.3f}")
-        self.hub.runtime_params["kp_steering"] = val
+            time.sleep(SEND_PERIOD)
 
+    # =================================================
+    # ================= DRIVE LAYER ===================
+    # =================================================
 
+    def _send_drive(self, steer, speed):
+
+        if speed >= 0:
+            dir_l = dir_r = 1
+            spd_l = spd_r = speed
+        else:
+            dir_l = dir_r = 2
+            spd_l = spd_r = abs(speed)
+
+        payload = bytes([
+            steer,
+            dir_l, spd_l,
+            dir_r, spd_r
+        ])
+
+        self.uart.send(build_packet(CMD_DRIVE, payload))

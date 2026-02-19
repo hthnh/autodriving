@@ -46,13 +46,16 @@ class ControlHub:
 
         self.emergency = False
 
+        # ==== NEW: last command tracking ====
+        self.last_speed = 0
+        self.last_steer = STEER_CENTER
+
         # ================= DEVICES =================
         self.uart = UARTDriver()
         self.uart.send(build_packet(CMD_PING))
         time.sleep(0.1)
 
         self.camera_manager = CameraManager()
-
         self.camera_manager.add_camera(1, {"size": (640, 480), "fps": 30})
         self.camera_manager.add_camera(0, {"size": (640, 480), "fps": 30})
 
@@ -63,6 +66,7 @@ class ControlHub:
 
         self.follow_state = FollowState()
         self.target_tracker = TargetTracker(self.follow_state)
+
         self.lidar_processor = LidarProcessor(
             front_width=60,
             side_width=60,
@@ -81,7 +85,7 @@ class ControlHub:
         self.thread.start()
 
     # =================================================
-    # PUBLIC API (GUI CALLS THESE)
+    # ================= CONTROL API ===================
     # =================================================
 
     def set_input(self, speed, steer):
@@ -96,6 +100,10 @@ class ControlHub:
 
         elif mode_name == "follow":
             self.mode = FollowMode(self)
+
+        elif mode_name == "auto":
+            # giữ mode, level sẽ quyết định
+            pass
 
     def set_level(self, level):
         self.input_state["level"] = level
@@ -113,7 +121,73 @@ class ControlHub:
         self.emergency = False
 
     # =================================================
-    # CONTROL LOOP
+    # ================= STATUS API ====================
+    # =================================================
+
+    def get_vehicle_status(self):
+        return {
+            "mode": self.input_state["mode"],
+            "level": self.input_state["level"],
+            "speed": self.last_speed,
+            "steer": self.last_steer,
+            "emergency": self.emergency
+        }
+
+    # =================================================
+    # ================= CAMERA API ====================
+    # =================================================
+
+    def start_camera(self, cam_id):
+        self.camera_manager.start(cam_id)
+
+    def stop_camera(self, cam_id):
+        self.camera_manager.stop(cam_id)
+
+    def is_camera_running(self, cam_id):
+        return self.camera_manager.is_running(cam_id)
+
+    def get_camera_frame(self, cam_id):
+        return self.camera_manager.get_frame(cam_id)
+
+    # =================================================
+    # ================= FOLLOW API ====================
+    # =================================================
+
+    def init_follow_target(self, bbox):
+        frame = self.get_camera_frame(1)
+        if frame is None:
+            return False
+        self.target_tracker.init_tracker(frame, bbox)
+        return True
+
+    def get_follow_status(self):
+        return {
+            "visible": self.follow_state.target_visible,
+            "error": self.follow_state.target_error,
+            "steer": self.follow_state.final_steer,
+            "speed": self.follow_state.final_speed
+        }
+
+    # =================================================
+    # ================= LANE API ======================
+    # =================================================
+
+    def get_lane_status(self):
+        return {
+            "running": self.lane_algo_running,
+            "error": self.lane_state.error,
+            "confidence": getattr(self.lane_state, "confidence", 0.0)
+        }
+
+    def get_lane_debug_frames(self):
+        return getattr(self.lane_state, "debug_frames", {})
+
+    def get_runtime_param(self, key):
+        return self.runtime_params.get(key)
+
+
+    # =================================================
+    # ================= LOOP ==========================
     # =================================================
 
     def _loop(self):
@@ -123,19 +197,22 @@ class ControlHub:
             if self.emergency:
                 steer = STEER_CENTER
                 speed = 0
-
             else:
                 steer, speed = self.mode.process(self.input_state)
 
             steer = clamp(int(steer), 45, 135)
             speed = clamp(int(speed), -MAX_SPEED, MAX_SPEED)
 
+            # ==== NEW: store last command ====
+            self.last_steer = steer
+            self.last_speed = speed
+
             self._send_drive(steer, speed)
 
             time.sleep(SEND_PERIOD)
 
     # =================================================
-    # DRIVE LAYER
+    # ================= DRIVE LAYER ===================
     # =================================================
 
     def _send_drive(self, steer, speed):

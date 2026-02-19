@@ -1,3 +1,4 @@
+#gui/mixins/camera_mixin.py
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import Qt
 
@@ -6,7 +7,8 @@ class CameraMixin:
 
     def on_target_selected(self, bbox):
 
-        frame = self.hub.camera_manager.get_frame(1)
+        frame = self.hub.get_camera_frame(1)
+
         if frame is None:
             return
 
@@ -32,28 +34,28 @@ class CameraMixin:
             print("Tracker initialized")
 
     def toggle_front_cam(self):
-        if self.hub.camera_manager.is_running(1):
-            self.hub.camera_manager.stop(1)
+        if self.hub.is_camera_running(1):
+            self.hub.stop_camera(1)
             self.btn_front_cam.setText("Front Cam ON")
         else:
-            self.hub.camera_manager.start(1)
+            self.hub.start_camera(1)
             self.btn_front_cam.setText("Front Cam OFF")
 
     def toggle_down_cam(self):
-        if self.hub.camera_manager.is_running(0):
-            self.hub.camera_manager.stop(0)
+        if self.hub.is_camera_running(0):
+            self.hub.stop_camera(0)
             self.btn_down_cam.setText("Down Cam ON")
         else:
-            self.hub.camera_manager.start(0)
+            self.hub.start_camera(0)
             self.btn_down_cam.setText("Down Cam OFF")
 
     def update_live_cameras(self):
 
-        frame_front = self.hub.camera_manager.get_frame(1)
+        frame_front = self.hub.get_camera_frame(1)
         if frame_front is not None:
             self._show_frame(frame_front, self.lbl_cam_front)
 
-        frame_down = self.hub.camera_manager.get_frame(0)
+        frame_down = self.hub.get_camera_frame(0)
         if frame_down is not None:
             self._show_frame(frame_down, self.lbl_cam_down)
 

@@ -1,3 +1,4 @@
+#gui/widgets/lidar_widget.py
 from PyQt5.QtWidgets import QWidget
 
 from PyQt5.QtGui import QPainter, QColor, QPen

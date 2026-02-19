@@ -1,4 +1,4 @@
-
+#gui/widgets/clickable_camera.py
 from PyQt5.QtWidgets import QLabel
 
 from PyQt5.QtGui import QPainter, QColor, QPen

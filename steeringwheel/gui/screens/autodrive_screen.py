@@ -1,3 +1,4 @@
+#gui/screens/autodrive_screen.py
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel
@@ -119,11 +120,11 @@ class AutoDriveScreen(QWidget):
 
     def _update_cameras(self):
 
-        frame_front = self.hub.camera_manager.get_frame(1)
+        frame_front = self.hub.get_camera_frame(1)
         if frame_front is not None:
             self._show_frame(frame_front, self.cam_front)
 
-        frame_down = self.hub.camera_manager.get_frame(0)
+        frame_down = self.hub.get_camera_frame(0)
         if frame_down is not None:
             self._show_frame(frame_down, self.cam_down)
 

@@ -1,3 +1,4 @@
+#gui/widgets/lane_extend_window.py
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout, QHBoxLayout,
@@ -47,16 +48,17 @@ class LaneExtendWindow(QWidget):
     # ================= UPDATE =================
 
     def refresh_view(self):
-        state = self.hub.lane_state
+        lane = self.hub.get_lane_status()
+        frames = self.hub.get_lane_debug_frames()
+
 
         # --- text ---
-        self.lbl_error.setText(f"Error: {state.error:.3f}")
-        self.lbl_conf.setText(f"Confidence: {state.confidence:.2f}")
+        self.lbl_error.setText(f"Error: {lane["error"]:.3f}")
+        self.lbl_conf.setText(f"Confidence: {lane["confidence"]:.2f}")
 
-        if not hasattr(state, "debug_frames"):
+        if not hasattr(lane, "debug_frames"):
             return
 
-        frames = state.debug_frames
 
         # --- RAW IMAGE ---
         if "raw" in frames:

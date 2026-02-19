@@ -1,3 +1,4 @@
+# gui/screen/follow_screen.py
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel
@@ -99,19 +100,19 @@ class FollowScreen(QWidget):
     # ==================================================
 
     def _toggle_front_cam(self):
-        if self.hub.camera_manager.is_running(1):
-            self.hub.camera_manager.stop(1)
+        if self.hub.is_camera_running(1):
+            self.hub.stop_camera(1)
             self.btn_front_cam.setText("Front Cam ON")
         else:
-            self.hub.camera_manager.start(1)
+            self.hub.start_camera(1)
             self.btn_front_cam.setText("Front Cam OFF")
 
     def _toggle_down_cam(self):
-        if self.hub.camera_manager.is_running(0):
-            self.hub.camera_manager.stop(0)
+        if self.hub.is_camera_running(0):
+            self.hub.stop_camera(0)
             self.btn_down_cam.setText("Down Cam ON")
         else:
-            self.hub.camera_manager.start(0)
+            self.hub.start_camera(0)
             self.btn_down_cam.setText("Down Cam OFF")
 
     # ==================================================
@@ -151,7 +152,7 @@ class FollowScreen(QWidget):
 
     def _on_target_selected(self, bbox):
 
-        frame = self.hub.camera_manager.get_frame(1)
+        frame = self.hub.get_camera_frame(1)
         if frame is None:
             return
 
@@ -171,7 +172,7 @@ class FollowScreen(QWidget):
             int(h * scale_y)
         )
 
-        self.hub.target_tracker.init_tracker(frame, scaled_bbox)
+        self.hub.init_follow_target(scaled_bbox)
 
     # ==================================================
     # TIMERS
@@ -189,11 +190,11 @@ class FollowScreen(QWidget):
 
     def _update_cameras(self):
 
-        frame_front = self.hub.camera_manager.get_frame(1)
+        frame_front = self.hub.get_camera_frame(1)
         if frame_front is not None:
             self._show_frame(frame_front, self.lbl_cam_front)
 
-        frame_down = self.hub.camera_manager.get_frame(0)
+        frame_down = self.hub.get_camera_frame(0)
         if frame_down is not None:
             self._show_frame(frame_down, self.lbl_cam_down)
 
@@ -222,12 +223,11 @@ class FollowScreen(QWidget):
 
     def _update_status(self):
 
-        last = getattr(self.hub, "last_cmd", None)
+        status = self.hub.get_vehicle_status()
 
-        if last:
-            self.lbl_speed.setText(f"Speed: {last['speed']}")
-            self.lbl_steer.setText(f"Steer: {last['steer']}")
+        self.lbl_speed.setText(f"Speed: {status['speed']}")
+        self.lbl_steer.setText(f"Steer: {status['steer']}")
 
-        self.lbl_error.setText(
-            f"Error: {self.hub.follow_state.target_error:.3f}"
-        )
+
+        follow = self.hub.get_follow_status()
+        self.lbl_error.setText(f"Error: {follow['error']:.3f}")

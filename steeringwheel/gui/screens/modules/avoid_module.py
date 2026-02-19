@@ -1,3 +1,4 @@
+#gui/screens/modules/avoid_module.py
 from PyQt5.QtWidgets import QGroupBox, QVBoxLayout, QLabel
 
 

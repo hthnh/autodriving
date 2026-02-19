@@ -1,3 +1,4 @@
+#core/behavior.py
 def follow_arbitration(follow_state, lidar_result, params):
 
     if not follow_state.target_visible:

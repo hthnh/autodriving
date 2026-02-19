@@ -1,3 +1,4 @@
+#gui/screens/manual_screen.py
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QGridLayout, QGroupBox

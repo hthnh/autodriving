@@ -149,6 +149,13 @@ class ControlHub:
     def get_camera_frame(self, cam_id):
         return self.camera_manager.get_frame(cam_id)
 
+    def start_camera(self, cam_id):
+        self.camera_manager.start(cam_id)
+
+    def stop_camera(self, cam_id):
+        self.camera_manager.stop(cam_id)
+
+
     # =================================================
     # ================= FOLLOW API ====================
     # =================================================

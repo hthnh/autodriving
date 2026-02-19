@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Autodrive Control</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<h1>Autodrive Control Hub</h1>
+
+<div class="mode-bar">
+    <button onclick="setMode('manual')">MANUAL</button>
+    <button onclick="setMode('follow')">FOLLOW</button>
+    <button onclick="setMode('auto')">AUTO</button>
+</div>
+
+<!-- ================= MANUAL SCREEN ================= -->
+<div id="manualScreen" class="screen">
+
+    <h2>MANUAL MODE</h2>
+
+    <div class="camera-row">
+        <img src="/camera/1" class="cam">
+        <img src="/camera/0" class="cam">
+    </div>
+
+    <div class="status">
+        <div>Speed: <span id="m_speed">0</span></div>
+        <div>Steer: <span id="m_steer">90</span></div>
+    </div>
+
+    <div class="joystick-container">
+        <canvas id="joystick" width="250" height="250"></canvas>
+    </div>
+
+    <div class="control-toggle">
+        <button id="controlBtn" onclick="toggleControl()">CONTROL OFF</button>
+    </div>
+
+    <button class="emergency" onclick="emergency()">EMERGENCY STOP</button>
+
+</div>
+
+
+<!-- ================= FOLLOW SCREEN ================= -->
+<div id="followScreen" class="screen" style="display:none;">
+
+    <h2>FOLLOW MODE</h2>
+
+    <!-- SENSOR ROW -->
+    <div class="camera-row">
+        <canvas id="frontCanvas" width="400" height="300"></canvas>
+        <canvas id="downCanvas" width="400" height="300"></canvas>
+        <canvas id="lidarCanvas" width="300" height="300"></canvas>
+    </div>
+
+    <!-- STATUS -->
+    <div class="status">
+        <div>Speed: <span id="f_speed">0</span></div>
+        <div>Steer: <span id="f_steer">90</span></div>
+        <div>Error: <span id="f_error">0</span></div>
+        <div>Visible: <span id="f_visible">false</span></div>
+    </div>
+
+    <!-- CONTROL BUTTONS -->
+    <div class="follow-controls">
+        <button onclick="toggleFrontCam()">Front Cam ON</button>
+        <button onclick="toggleDownCam()">Down Cam ON</button>
+        <button onclick="toggleLidar()">Lidar ON</button>
+        <button onclick="toggleFollow()">START FOLLOW</button>
+    </div>
+
+    <button class="emergency" onclick="emergency()">EMERGENCY STOP</button>
+
+</div>
+
+
+
+<!-- ================= AUTO SCREEN ================= -->
+<div id="autoScreen" class="screen" style="display:none;">
+
+    <h2>AUTO MODE</h2>
+
+    <div class="camera-row">
+        <img src="/camera/1" class="cam">
+        <img src="/camera/0" class="cam">
+    </div>
+
+    <div class="levels">
+        <button onclick="setLevel(0)">L0</button>
+        <button onclick="setLevel(1)">L1</button>
+        <button onclick="setLevel(2)">L2</button>
+    </div>
+
+    <div class="status">
+        <div>Speed: <span id="a_speed">0</span></div>
+        <div>Steer: <span id="a_steer">90</span></div>
+        <div>Lane Error: <span id="a_error">0</span></div>
+    </div>
+
+    <button class="emergency" onclick="emergency()">EMERGENCY STOP</button>
+
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

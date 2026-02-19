@@ -1,0 +1,86 @@
+body {
+    background: #111;
+    color: white;
+    font-family: Arial;
+    text-align: center;
+}
+
+h1 {
+    margin-bottom: 10px;
+}
+
+.mode-bar button,
+.levels button,
+.manual button {
+    font-size: 20px;
+    padding: 15px 25px;
+    margin: 5px;
+}
+
+.camera-row {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+}
+
+.cam {
+    width: 400px;
+    border: 2px solid white;
+}
+
+.status {
+    margin: 15px;
+    font-size: 18px;
+}
+
+.manual {
+    margin-top: 20px;
+}
+
+.emergency {
+    background: red;
+    color: white;
+    font-size: 25px;
+    padding: 20px 40px;
+    margin-top: 20px;
+}
+
+
+.joystick-container {
+    margin-top: 20px;
+}
+
+#joystick {
+    background: #222;
+    border-radius: 50%;
+    touch-action: none;
+}
+.control-toggle button {
+    font-size: 20px;
+    padding: 12px 30px;
+    margin-top: 15px;
+}
+
+.levels {
+    margin-top: 15px;
+}
+
+.screen {
+    margin-top: 20px;
+}
+
+.mode-bar button {
+    font-size: 20px;
+    padding: 10px 25px;
+    margin: 5px;
+}
+
+.status {
+    margin-top: 10px;
+    font-size: 18px;
+}
+.follow-controls button {
+    font-size: 18px;
+    padding: 10px 20px;
+    margin: 5px;
+}

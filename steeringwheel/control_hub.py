@@ -2,7 +2,6 @@ import time
 import threading
 import sys
 import select
-import math
 
 from protocol import build_packet, CMD_DRIVE, CMD_PING
 from uart_driver import UARTDriver
@@ -41,50 +40,46 @@ class ControlHub:
         self.last_cmd = None
         self.last_send = 0.0
 
-        # ===== RUNTIME PARAMS (NEW) =====
-        self.runtime_params = {
-            "stop_threshold": 0.5,
-            "kp_steering": 0.004
-        }
 
-
-        self.uart = UARTDriver()
-
-        # quick link check
-        self.uart.send(build_packet(CMD_PING))
-        time.sleep(0.1)
 
         # ====== MANUAL STATE (NEW – nhưng an toàn) ======
         self.manual_steer = STEER_CENTER
         self.manual_speed = 0
 
         # ====== LANE KEEPING (NEW) ======
-        self.lane_state = LaneAlgoState()
-        self.lane_algo = None
-        self.lane_algo_running = False
-        # ===== CAMERA MANAGER =====
-        self.camera_manager = CameraManager()
 
-        # Config riêng 2 cam
-        self.camera_manager.add_camera(1, {
-            "size": (640, 480),   # fisheye front
-            "fps": 30
-        })
-
-        self.camera_manager.add_camera(0, {
-            "size": (640, 480),   # down lane
-            "fps": 30
-        })
         # ===== FOLLOW SYSTEM =====
-        self.follow_state = FollowState()
-        self.target_tracker = TargetTracker(self.follow_state)
-        self.lidar_processor = LidarProcessor(
-            front_width=60,
-            side_width=60,
-            stop_threshold=self.runtime_params["stop_threshold"]
-        )
 
-        self.follow_running = False
+
+        # ===== INTERNAL CONTROL LOOP =====
+        self.running = True
+        self.control_thread = threading.Thread(
+            target=self._control_loop,
+            daemon=True
+        )
+        self.control_thread.start()
+
+
+    def _control_loop(self):
+        while self.running:
+            # gửi theo trạng thái hiện tại
+            if self.active_source == "manual":
+                self._send_drive(
+                    self.manual_steer,
+                    self.manual_speed,
+                    "manual"
+                )
+            else:
+                # autodrive vẫn dùng manual làm base,
+                # vì merge logic nằm trong _send_drive
+                self._send_drive(
+                    self.manual_steer,
+                    self.manual_speed,
+                    "autodrive"
+                )
+
+            time.sleep(SEND_PERIOD)
+
 
     def init_follow_tracker(self, bbox):
         frame = self.camera_manager.get_frame(1)  # front cam
@@ -237,6 +232,8 @@ class ControlHub:
             bytes([STEER_CENTER, 0, 0, 0, 0])
         ))
         self.uart.close()
+        self.running = False
+
 
 
     def get_mock_scan(self):

@@ -12,7 +12,7 @@ def follow_arbitration(follow_state, lidar_result, params):
     error = follow_state.target_error
 
     steer = 90 + error * 45   # tối đa lệch 45 độ
-    speed = 60                # tạm thời fix
+    speed = 100                # tạm thời fix
 
     follow_state.final_steer = int(steer)
     follow_state.final_speed = int(speed)

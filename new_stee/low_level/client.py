@@ -11,6 +11,7 @@ HEADER = 0xAA
 DIR_STOP = 0
 DIR_FORWARD = 1
 DIR_REVERSE = 2
+SERIAL_READ_TIMEOUT = 0.05
 
 
 class LowLevelClient:
@@ -24,7 +25,9 @@ class LowLevelClient:
         self.ser = serial.Serial(
             port,
             baud,
-            timeout=0,
+            # Once a byte arrives, allow the rest of the telemetry line to
+            # arrive. A nonblocking readline() returned arbitrary fragments.
+            timeout=SERIAL_READ_TIMEOUT,
         )
 
         self.tx_period = 1.0 / tx_hz
@@ -47,25 +50,41 @@ class LowLevelClient:
 
         self.running = False
         self.lock = threading.Lock()
+        self.threads = []
 
     def start(self):
-        self.running = True
+        with self.lock:
+            if self.running:
+                return
+            self.running = True
 
-        threading.Thread(
+        tx_thread = threading.Thread(
             target=self._tx_loop,
             daemon=True,
-        ).start()
+            name="low-level-tx",
+        )
 
-        threading.Thread(
+        rx_thread = threading.Thread(
             target=self._rx_loop,
             daemon=True,
-        ).start()
+            name="low-level-rx",
+        )
+        self.threads = [tx_thread, rx_thread]
+        for thread in self.threads:
+            thread.start()
 
     def close(self):
         self.set_intent(ControlIntent.stop("close"))
-        time.sleep(0.2)
+        # Give the TX loop enough time to put at least one explicit stop packet
+        # on the wire before terminating the workers.
+        time.sleep(max(0.2, self.tx_period * 2))
 
-        self.running = False
+        with self.lock:
+            self.running = False
+
+        for thread in self.threads:
+            thread.join(timeout=max(0.5, self.tx_period * 4))
+        self.threads = []
 
         try:
             self.ser.close()

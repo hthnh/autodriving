@@ -27,6 +27,7 @@ class CameraWorker:
         self.thread = None
         self.camera = None
         self.frame = self._placeholder("camera starting")
+        self.latest_array = None
         self.state = {
             "ok": False,
             "fps": 0.0,
@@ -61,6 +62,13 @@ class CameraWorker:
     def get_frame(self):
         with self.lock:
             return self.frame
+
+    def get_array(self):
+        """Return an isolated copy of the latest raw RGB frame, if available."""
+        with self.lock:
+            if self.latest_array is None:
+                return None
+            return self.latest_array.copy()
 
     def get_state(self):
         with self.lock:
@@ -102,6 +110,7 @@ class CameraWorker:
                 now = time.time()
                 with self.lock:
                     self.frame = jpeg
+                    self.latest_array = array.copy()
                     self.state = {
                         "ok": True,
                         "fps": round(measured_fps, 1),
@@ -114,6 +123,7 @@ class CameraWorker:
             logger.warning("%s camera: %s", self.name, error)
             with self.lock:
                 self.frame = self._placeholder(error)
+                self.latest_array = None
                 self.state = {
                     "ok": False,
                     "fps": 0.0,
@@ -184,9 +194,9 @@ class CameraWorker:
 
 
 class CameraManager:
-    """Own two independent CSI camera workers and their latest JPEG frames."""
+    """Own CSI camera workers and expose their latest JPEG and raw RGB frames."""
 
-    def __init__(self, front_id=0, down_id=1, width=640, height=480, fps=15.0):
+    def __init__(self, front_id=1, down_id=0, width=640, height=480, fps=15.0):
         self.fps = fps
         self.cameras = {
             "front": CameraWorker("front", front_id, width, height, fps),
@@ -203,6 +213,10 @@ class CameraManager:
 
     def get_frame(self, name):
         return self.cameras[name].get_frame()
+
+    def get_array(self, name):
+        """Return a copy of one camera's latest raw RGB frame, if available."""
+        return self.cameras[name].get_array()
 
     def get_state(self):
         return {
